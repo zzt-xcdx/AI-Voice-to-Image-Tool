@@ -101,6 +101,22 @@ def clean_json_response(text: str) -> str:
     return t
 
 
+def normalize_punct(text: str) -> str:
+    """
+    将常见中文引号/冒号等替换为半角，减少 LLM 返回非标准 JSON 的概率。
+    """
+    trans_table = str.maketrans({
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+        "：": ":",
+        "，": ",",
+        "；": ";",
+    })
+    return text.translate(trans_table)
+
+
 def transcode_to_pcm16k(raw_bytes: bytes) -> bytes:
     """
     使用系统 ffmpeg 将任意音频转为 16k 单声道 s16le PCM。
@@ -333,7 +349,7 @@ async def call_nlu(asr_text: str) -> VoiceResponse:
     except LLMError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    cleaned = clean_json_response(content)
+    cleaned = normalize_punct(clean_json_response(content))
     try:
         data = VoiceResponse.model_validate_json(cleaned)
     except ValidationError as exc:

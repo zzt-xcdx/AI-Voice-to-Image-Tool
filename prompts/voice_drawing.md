@@ -41,3 +41,4 @@
 - 仅输出纯 JSON 对象，不要 Markdown，不要三引号代码块。
 - 撤销/清空/保存：action=undo|clear|save，其他字段可省略。
 - shape=text 时使用 text 字段。
+- 直线可用网格坐标：默认画布有网格 A1…（列字母、行数字），当用户说“从 K1 到 F5 画直线”，输出 `shape=line` 并附 `from_cell` 与 `to_cell` 字段（如 `"from_cell":"K1","to_cell":"F5"`）；前端会按网格中心点绘制直线。

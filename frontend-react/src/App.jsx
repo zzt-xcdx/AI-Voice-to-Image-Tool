@@ -39,6 +39,7 @@ const StatusChip = ({ status }) => {
 
 function App() {
   const canvasRef = useRef(null)
+  const backgroundRef = useRef(null)
   const audioCtxRef = useRef(null)
   const mediaStreamRef = useRef(null)
   const processorRef = useRef(null)
@@ -58,6 +59,18 @@ function App() {
   const [drawings, setDrawings] = useState([])
   const [loadingDrawings, setLoadingDrawings] = useState(false)
   const [saving, setSaving] = useState(false)
+  const LOCAL_KEY = 'voice2canvas_stack_v1'
+  const [showGrid, setShowGrid] = useState(true)
+  const [gridCols, setGridCols] = useState(12)
+  const [gridRows, setGridRows] = useState(8)
+  const [lineFromCell, setLineFromCell] = useState('')
+  const [lineToCell, setLineToCell] = useState('')
+  const [lineWidthSetting, setLineWidthSetting] = useState(2)
+  const [lineDashed, setLineDashed] = useState(false)
+  const [aiPrompt, setAiPrompt] = useState('')
+  const [aiGenerating, setAiGenerating] = useState(false)
+  const [autoAiPending, setAutoAiPending] = useState(false)
+  const [aiFromVoiceMode, setAiFromVoiceMode] = useState(false)
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -65,6 +78,18 @@ function App() {
     const ctx = canvas.getContext('2d')
     ctx.fillStyle = '#ffffff'
     ctx.fillRect(0, 0, canvas.width, canvas.height)
+    // 恢复本地存储的命令
+    try {
+      const cached = localStorage.getItem(LOCAL_KEY)
+      if (cached) {
+        const commands = JSON.parse(cached)
+        replaceStack(commands)
+        setCommandJson(JSON.stringify(commands, null, 2))
+        setStatus('已恢复上次画板')
+      }
+    } catch (e) {
+      // ignore
+    }
   }, [])
 
   useEffect(() => {
@@ -72,6 +97,11 @@ function App() {
       cleanupAudio()
     }
   }, [])
+
+  useEffect(() => {
+    redraw()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showGrid, gridCols, gridRows])
 
   const cleanupAudio = (opts = { resetPcm: true }) => {
     processorRef.current?.disconnect()
@@ -188,6 +218,8 @@ function App() {
     const form = new FormData()
     form.append('file', blob, 'speech.wav')
     try {
+      setAsrText('识别中…')
+      setReplyText('')
       const res = await fetch(`${apiBase}/api/asr-nlu`, { method: 'POST', body: form })
       const text = await res.text()
 
@@ -212,21 +244,45 @@ function App() {
         synthRef.current.cancel()
         synthRef.current.speak(utter)
       }
-      setCommandJson(JSON.stringify(data.commands || [], null, 2))
-      applyCommands(data.commands || [])
-      addHistory({
-        asr: data.asr_text || '',
-        reply: data.reply_text || '',
-        commands: data.commands || [],
+      const cmds = (data.commands || []).map((cmd) => {
+        if (cmd.shape === 'line') {
+          // 若缺坐标，尝试从语音文本提取
+          if (!cmd.from_cell || !cmd.to_cell) {
+            const cells = extractCellsFromText(data.asr_text || '')
+            if (cells.length >= 2) {
+              return { ...cmd, from_cell: cells[0], to_cell: cells[1] }
+            }
+          }
+          // 确保有 stroke
+          const stroke = cmd.stroke || { color: '#000000', width: lineWidthSetting, dash: lineDashed ? [6, 4] : [] }
+          return { ...cmd, stroke }
+        }
+        return cmd
       })
-      setStatus('完成')
+      setCommandJson(JSON.stringify(cmds, null, 2))
+      if (aiFromVoiceMode) {
+        // 不画命令，直接用 ASR 文本调用 AI 生图
+        handleGenImage(data.asr_text || '')
+        setAiFromVoiceMode(false)
+        setStatus('AI 生图处理中…')
+      } else {
+        // 语音命令不清空历史，叠加绘制
+        applyCommands(cmds, false)
+        addHistory({
+          asr: data.asr_text || '',
+          reply: data.reply_text || '',
+          commands: data.commands || [],
+        })
+        setStatus('完成')
+      }
     } catch (err) {
       setStatus(`错误：${err?.message || '识别失败'}`)
     }
   }
 
-  const applyCommands = (commands) => {
-    const stack = [...stackRef.current]
+  const applyCommands = (commands, reset = false) => {
+    const shouldReset = reset && (commands?.length || 0) > 0
+    const stack = shouldReset ? [] : [...stackRef.current]
     for (const cmd of commands) {
       if (cmd.action === 'undo') {
         stack.pop()
@@ -239,12 +295,75 @@ function App() {
       }
     }
     stackRef.current = stack
+    try {
+      localStorage.setItem(LOCAL_KEY, JSON.stringify(stackRef.current))
+    } catch (e) {
+      // ignore
+    }
     redraw()
   }
 
   const replaceStack = (commands) => {
     stackRef.current = [...(commands || [])]
+    try {
+      localStorage.setItem(LOCAL_KEY, JSON.stringify(stackRef.current))
+    } catch (e) {
+      // ignore
+    }
     redraw()
+  }
+
+  const colLabel = (idx) => {
+    let n = idx
+    let label = ''
+    while (n >= 0) {
+      label = String.fromCharCode((n % 26) + 65) + label
+      n = Math.floor(n / 26) - 1
+    }
+    return label
+  }
+
+  const parseCell = (cell) => {
+    if (!cell || typeof cell !== 'string') return null
+    const trimmed = cell.trim().toUpperCase()
+    let match = trimmed.match(/^([A-Z]+)(\d+)$/)
+    // 容错：无数字但以 I/L 结尾时，当作 1（处理 ASR 把 A1 听成 AI / AL）
+    if (!match && /^[A-Z]+[IL]$/.test(trimmed)) {
+      match = trimmed.replace(/([IL])$/, '1').match(/^([A-Z]+)(\d+)$/)
+    }
+    if (!match) return null
+    const [, letters, numStr] = match
+    let col = 0
+    for (let i = 0; i < letters.length; i += 1) {
+      col = col * 26 + (letters.charCodeAt(i) - 64)
+    }
+    col -= 1
+    const row = parseInt(numStr, 10) - 1
+    if (Number.isNaN(row) || row < 0 || col < 0) return null
+    return { col, row }
+  }
+
+  const extractCellsFromText = (text) => {
+    if (!text) return []
+    const found = []
+    const re = /([A-Za-z]+[0-9]+)/g
+    let m
+    while ((m = re.exec(text)) && found.length < 4) {
+      found.push(m[1])
+    }
+    return found
+  }
+
+  const cellToCenterPx = (cell) => {
+    const canvas = canvasRef.current
+    if (!canvas) return null
+    const parsed = typeof cell === 'string' ? parseCell(cell) : cell
+    if (!parsed) return null
+    const { col, row } = parsed
+    if (col >= gridCols || row >= gridRows) return null
+    const cellW = canvas.width / gridCols
+    const cellH = canvas.height / gridRows
+    return { x: (col + 0.5) * cellW, y: (row + 0.5) * cellH }
   }
 
   const toPx = (val, axis) => {
@@ -264,10 +383,11 @@ function App() {
     const h = size.relative === false ? size.height || 100 : (size.height || 0.2) * canvas.height
 
     ctx.save()
-    ctx.fillStyle = cmd.fill || cmd.color || '#ff0000'
-    if (cmd.stroke) {
-      ctx.strokeStyle = cmd.stroke.color || '#000000'
-      ctx.lineWidth = cmd.stroke.width || 2
+    ctx.fillStyle = typeof cmd.fill === 'string' ? cmd.fill : typeof cmd.color === 'string' ? cmd.color : '#ff0000'
+    const strokeObj = cmd.stroke || (cmd.color && typeof cmd.color === 'object' ? cmd.color : null)
+    if (strokeObj) {
+      ctx.strokeStyle = strokeObj.color || '#000000'
+      ctx.lineWidth = strokeObj.width || 2
     }
 
     switch (cmd.shape) {
@@ -305,16 +425,33 @@ function App() {
         break
       }
       case 'line': {
-        ctx.beginPath()
-        ctx.moveTo(x - w / 2, y - h / 2)
-        ctx.lineTo(x + w / 2, y + h / 2)
-        if (cmd.stroke) {
-          ctx.stroke()
-        } else {
-          ctx.strokeStyle = cmd.color || '#000000'
-          ctx.lineWidth = 2
-          ctx.stroke()
+        let start = null
+        let end = null
+        if (cmd.from_cell && cmd.to_cell) {
+          start = cellToCenterPx(cmd.from_cell)
+          end = cellToCenterPx(cmd.to_cell)
         }
+        if (!start || !end) {
+          start = { x: x - w / 2, y: y - h / 2 }
+          end = { x: x + w / 2, y: y + h / 2 }
+        }
+        // 对齐到 0.5 像素避免模糊
+        const sx = Math.round(start.x) + 0.5
+        const sy = Math.round(start.y) + 0.5
+        const ex = Math.round(end.x) + 0.5
+        const ey = Math.round(end.y) + 0.5
+        ctx.beginPath()
+        ctx.moveTo(sx, sy)
+        ctx.lineTo(ex, ey)
+        ctx.strokeStyle = strokeObj?.color || '#000000'
+        ctx.lineWidth = strokeObj?.width || 2
+        if (strokeObj?.dash && Array.isArray(strokeObj.dash) && strokeObj.dash.length > 0) {
+          ctx.setLineDash(strokeObj.dash)
+        } else {
+          ctx.setLineDash([])
+        }
+        ctx.lineCap = 'round'
+        ctx.stroke()
         break
       }
       case 'text': {
@@ -336,12 +473,54 @@ function App() {
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    // 背景层
+    if (backgroundRef.current) {
+      ctx.drawImage(backgroundRef.current, 0, 0, canvas.width, canvas.height)
+    } else {
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+    }
+    drawGrid(ctx, canvas)
     for (const cmd of stackRef.current) {
       if (cmd.action !== 'draw') continue
       drawShape(ctx, cmd)
     }
+  }
+
+  const drawGrid = (ctx, canvas) => {
+    if (!showGrid) return
+    const cellW = canvas.width / gridCols
+    const cellH = canvas.height / gridRows
+    ctx.save()
+    ctx.strokeStyle = 'rgba(100,116,139,0.35)'
+    ctx.lineWidth = 1
+    for (let i = 0; i <= gridCols; i += 1) {
+      const x = Math.round(i * cellW) + 0.5
+      ctx.beginPath()
+      ctx.moveTo(x, 0)
+      ctx.lineTo(x, canvas.height)
+      ctx.stroke()
+    }
+    for (let j = 0; j <= gridRows; j += 1) {
+      const y = Math.round(j * cellH) + 0.5
+      ctx.beginPath()
+      ctx.moveTo(0, y)
+      ctx.lineTo(canvas.width, y)
+      ctx.stroke()
+    }
+    ctx.fillStyle = 'rgba(51,65,85,0.9)'
+    ctx.font = '12px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'top'
+    for (let i = 0; i < gridCols; i += 1) {
+      ctx.fillText(colLabel(i), (i + 0.5) * cellW, 2)
+    }
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'middle'
+    for (let j = 0; j < gridRows; j += 1) {
+      ctx.fillText(`${j + 1}`, 4, (j + 0.5) * cellH)
+    }
+    ctx.restore()
   }
 
   const saveCanvas = () => {
@@ -437,6 +616,101 @@ function App() {
     }
   }
 
+  const loadBackground = async (theme) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    try {
+      setStatus('背景生成中…')
+      const res = await fetch(`/api/background?width=${canvas.width}&height=${canvas.height}&theme=${theme}`)
+      if (!res.ok) throw new Error(res.statusText)
+      const blob = await res.blob()
+      const img = new Image()
+      img.onload = () => {
+        backgroundRef.current = img
+        redraw()
+        setStatus('背景已更新')
+      }
+      img.onerror = () => {
+        setStatus('错误：背景加载失败')
+      }
+      img.src = URL.createObjectURL(blob)
+    } catch (err) {
+      setStatus(`错误：${err?.message || '背景失败'}`)
+    }
+  }
+
+  const handleGenImage = async (promptOverride) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const promptToUse = (promptOverride && promptOverride.trim()) || aiPrompt.trim()
+    if (!promptToUse) {
+      setStatus('请先输入生成提示词')
+      return
+    }
+    if (!promptOverride) {
+      setAiPrompt(promptToUse)
+    }
+    setAiGenerating(true)
+    try {
+      setStatus('AI 生成中…')
+      const res = await fetch(`${apiBase}/api/gen-image`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: promptToUse, size: '768x768' }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || res.statusText)
+      const img = new Image()
+      img.onload = () => {
+        backgroundRef.current = img
+        redraw()
+        setStatus('背景已更新（AI 生成）')
+      }
+      img.onerror = () => setStatus('错误：AI 背景加载失败')
+      img.src = `data:image/png;base64,${data.image_base64}`
+    } catch (err) {
+      setStatus(`错误：${err?.message || 'AI 生成失败'}`)
+    } finally {
+      setAiGenerating(false)
+    }
+  }
+
+  const maybeAutoGenBgFromVoice = (text) => {
+    if (!text) return
+    const t = text.trim()
+    // 关键词检测：生成背景 / AI生图 / 生成图片 / 用AI
+    const hit = /(生成背景|背景|生图|生成图片|用AI)/i.test(t)
+    if (!hit) return
+    setAiPrompt(t)
+    setAutoAiPending(true)
+    handleGenImage(t)
+  }
+
+  const handleAddLine = () => {
+    if (!lineFromCell || !lineToCell) {
+      setStatus('请输入起点和终点坐标，例如 A1 和 F5')
+      return
+    }
+    const start = cellToCenterPx(lineFromCell)
+    const end = cellToCenterPx(lineToCell)
+    if (!start || !end) {
+      setStatus('坐标无效或超出网格范围')
+      return
+    }
+    const cmd = {
+      action: 'draw',
+      shape: 'line',
+      from_cell: lineFromCell,
+      to_cell: lineToCell,
+      stroke: { color: '#000000', width: lineWidthSetting, dash: lineDashed ? [6, 4] : [] },
+    }
+    applyCommands([cmd])
+    setCommandJson(JSON.stringify(stackRef.current, null, 2))
+    setLineFromCell('')
+    setLineToCell('')
+    setStatus('已添加直线')
+  }
+
   return (
     <div className="min-h-screen text-slate-900">
       <div className="mx-auto max-w-6xl px-4 py-8 space-y-6">
@@ -460,29 +734,8 @@ function App() {
           </div>
         </header>
 
-        <div className="flex flex-wrap gap-2">
-          {[
-            { id: 'draw', label: '绘图工作台' },
-            { id: 'inspect', label: '识别 / 命令 / 历史' },
-            { id: 'guide', label: '提示词规范' },
-          ].map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`px-3 py-2 rounded-lg border text-sm transition ${
-                activeTab === tab.id
-                  ? 'border-emerald-500 text-emerald-700 bg-emerald-50'
-                  : 'border-slate-200 text-slate-700 hover:bg-slate-100'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-
-        {activeTab === 'draw' && (
-          <div className="grid gap-4 lg:grid-cols-3">
-            <section className="lg:col-span-1 rounded-xl border border-slate-200 bg-white shadow-sm p-4 space-y-3">
+        <div className="grid gap-4 lg:grid-cols-3">
+          <section className="lg:col-span-1 rounded-xl border border-slate-200 bg-white shadow-sm p-4 space-y-3">
             <div className="flex items-center gap-2">
               <button
                 onClick={startRecording}
@@ -506,6 +759,99 @@ function App() {
               <p>• “在中间写四个字：你好世界”</p>
             </div>
             <div className="text-xs text-amber-600 font-medium">{status}</div>
+              <div className="border-t border-slate-200 pt-3 space-y-2">
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-2 text-sm text-slate-800">
+                    <input
+                      type="checkbox"
+                      checked={showGrid}
+                      onChange={(e) => setShowGrid(e.target.checked)}
+                    />
+                    显示网格
+                  </label>
+                  <div className="flex items-center gap-2 text-sm text-slate-700">
+                    <span>列</span>
+                    <input
+                      type="number"
+                      min="2"
+                      max="52"
+                      value={gridCols}
+                      onChange={(e) => setGridCols(Math.min(52, Math.max(2, parseInt(e.target.value, 10) || 12)))}
+                      className="w-16 px-2 py-1 border border-slate-200 rounded"
+                    />
+                    <span>行</span>
+                    <input
+                      type="number"
+                      min="2"
+                      max="52"
+                      value={gridRows}
+                      onChange={(e) => setGridRows(Math.min(52, Math.max(2, parseInt(e.target.value, 10) || 8)))}
+                      className="w-16 px-2 py-1 border border-slate-200 rounded"
+                    />
+                  </div>
+                </div>
+              </div>
+              <div className="border-t border-slate-200 pt-3 space-y-2">
+                <div className="text-sm font-semibold text-slate-900">AI 生图（语音按钮）</div>
+                <div className="space-y-2">
+                  <button
+                    onClick={() => {
+                      setAiFromVoiceMode(true)
+                      startRecording()
+                      setStatus('语音采集中（AI 生图）…')
+                    }}
+                    disabled={isRecording || aiGenerating}
+                    className="px-3 py-2 rounded-lg bg-indigo-600 text-white text-sm font-semibold disabled:bg-indigo-200 disabled:text-indigo-700"
+                  >
+                    {isRecording ? '录音中…' : '语音生成图片'}
+                  </button>
+                  <p className="text-xs text-slate-500">说出你想生成的画面，例如：“夕阳下的草地和远山”。</p>
+                </div>
+              </div>
+              <div className="border-t border-slate-200 pt-3 space-y-2">
+                <div className="text-sm font-semibold text-slate-900">手动画直线（网格坐标）</div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    value={lineFromCell}
+                    onChange={(e) => setLineFromCell(e.target.value)}
+                    placeholder="起点 如 A1"
+                    className="px-3 py-2 border border-slate-200 rounded-lg text-sm w-28"
+                  />
+                  <span className="text-sm text-slate-600">→</span>
+                  <input
+                    value={lineToCell}
+                    onChange={(e) => setLineToCell(e.target.value)}
+                    placeholder="终点 如 F5"
+                    className="px-3 py-2 border border-slate-200 rounded-lg text-sm w-28"
+                  />
+                  <button
+                    onClick={handleAddLine}
+                    className="px-3 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-500"
+                  >
+                    画直线
+                  </button>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-sm text-slate-700">
+                  <span>线宽</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="12"
+                    value={lineWidthSetting}
+                    onChange={(e) => setLineWidthSetting(Math.min(12, Math.max(1, parseInt(e.target.value, 10) || 2)))}
+                    className="w-16 px-2 py-1 border border-slate-200 rounded"
+                  />
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={lineDashed}
+                      onChange={(e) => setLineDashed(e.target.checked)}
+                    />
+                    虚线
+                  </label>
+                </div>
+                <p className="text-xs text-slate-500">支持语音：“从 A1 到 F5 画直线”。</p>
+              </div>
           </section>
 
           <section className="lg:col-span-2 rounded-xl border border-slate-200 bg-white shadow-sm p-4 space-y-3">
@@ -522,110 +868,102 @@ function App() {
               <p>仅语音下达指令，画布不接受鼠标/键盘操作。</p>
             </div>
           </section>
+        </div>
+        <section className="grid gap-4 lg:grid-cols-3">
+          <div className="rounded-xl border border-slate-200 bg-white shadow-sm p-4 space-y-2">
+            <h2 className="text-sm font-semibold text-slate-900">识别与回复</h2>
+            <p className="text-xs text-slate-500">ASR 文本：</p>
+            <div className="text-sm text-slate-800 min-h-[40px]">{asrText}</div>
+            <p className="text-xs text-slate-500 mt-2">回复：</p>
+            <div className="text-sm text-emerald-600 min-h-[40px]">{replyText}</div>
           </div>
-        )}
-
-        {activeTab === 'inspect' && (
-          <section className="grid gap-4 lg:grid-cols-3">
-            <div className="rounded-xl border border-slate-200 bg-white shadow-sm p-4 space-y-2">
-              <h2 className="text-sm font-semibold text-slate-900">识别与回复</h2>
-              <p className="text-xs text-slate-500">ASR 文本：</p>
-              <div className="text-sm text-slate-800 min-h-[40px]">{asrText}</div>
-              <p className="text-xs text-slate-500 mt-2">回复：</p>
-              <div className="text-sm text-emerald-600 min-h-[40px]">{replyText}</div>
-            </div>
-            <div className="rounded-xl border border-slate-200 bg-white shadow-sm p-4 space-y-2">
-              <h2 className="text-sm font-semibold text-slate-900">解析到的命令</h2>
-              <pre className="text-xs text-slate-800 bg-slate-50 border border-slate-200 rounded-lg p-3 min-h-[120px] whitespace-pre-wrap">
-                {commandJson}
-              </pre>
-            </div>
-            <div className="rounded-xl border border-slate-200 bg-white shadow-sm p-4 space-y-3">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-900">历史记录</h2>
-                <div className="text-xs text-slate-700 space-y-2 max-h-56 overflow-y-auto">
-                  {history.slice(0, 20).map((h, idx) => (
-                    <div
-                      key={`${h.ts}-${idx}`}
-                      className="border border-slate-200 rounded-lg p-2 bg-slate-50"
-                    >
-                      <div className="text-[11px] text-slate-500">{h.ts}</div>
-                      <div className="text-[12px] text-slate-800">ASR: {h.asr || ''}</div>
-                      <div className="text-[12px] text-emerald-700">Reply: {h.reply || ''}</div>
-                      <div className="text-[11px] text-slate-600">
-                        Cmds: {JSON.stringify(h.commands || [])}
-                      </div>
+          <div className="rounded-xl border border-slate-200 bg-white shadow-sm p-4 space-y-2">
+            <h2 className="text-sm font-semibold text-slate-900">解析到的命令</h2>
+            <pre className="text-xs text-slate-800 bg-slate-50 border border-slate-200 rounded-lg p-3 min-h-[120px] whitespace-pre-wrap">
+              {commandJson}
+            </pre>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white shadow-sm p-4 space-y-3">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-900">历史记录</h2>
+              <div className="text-xs text-slate-700 space-y-2 max-h-56 overflow-y-auto">
+                {history.slice(0, 20).map((h, idx) => (
+                  <div
+                    key={`${h.ts}-${idx}`}
+                    className="border border-slate-200 rounded-lg p-2 bg-slate-50"
+                  >
+                    <div className="text-[11px] text-slate-500">{h.ts}</div>
+                    <div className="text-[12px] text-slate-800">ASR: {h.asr || ''}</div>
+                    <div className="text-[12px] text-emerald-700">Reply: {h.reply || ''}</div>
+                    <div className="text-[11px] text-slate-600">
+                      Cmds: {JSON.stringify(h.commands || [])}
                     </div>
-                  ))}
-                </div>
-              </div>
-              <div className="border-t border-slate-200 pt-3 space-y-1 text-xs text-slate-600">
-                <div className="text-slate-900 font-semibold">标准指令白名单</div>
-                {defaultCommandsHint.map((line) => (
-                  <p key={line}>{line}</p>
+                  </div>
                 ))}
               </div>
             </div>
-          </section>
-        )}
-
-        {activeTab === 'guide' && (
-          <section className="rounded-xl border border-slate-200 bg-white shadow-sm p-4 space-y-2">
-            <h2 className="text-sm font-semibold text-slate-900">提示词规范（说话更好画）</h2>
-            <ul className="list-disc pl-5 text-sm text-slate-700 space-y-1">
-              {guidance.map((g) => (
-                <li key={g}>{g}</li>
+            <div className="border-t border-slate-200 pt-3 space-y-1 text-xs text-slate-600">
+              <div className="text-slate-900 font-semibold">标准指令白名单</div>
+              {defaultCommandsHint.map((line) => (
+                <p key={line}>{line}</p>
               ))}
-            </ul>
-          </section>
-        )}
+            </div>
+          </div>
+        </section>
 
-        {activeTab === 'inspect' && (
-          <section className="rounded-xl border border-slate-200 bg-white shadow-sm p-4 space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <input
-                value={saveTitle}
-                onChange={(e) => setSaveTitle(e.target.value)}
-                placeholder="保存名称（可选）"
-                className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-              />
+        <section className="rounded-xl border border-slate-200 bg-white shadow-sm p-4 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={saveTitle}
+              onChange={(e) => setSaveTitle(e.target.value)}
+              placeholder="保存名称（可选）"
+              className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+            />
+            <button
+              onClick={saveDrawing}
+              disabled={saving}
+              className="px-3 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold disabled:bg-emerald-200 disabled:text-emerald-700"
+            >
+              {saving ? '保存中…' : '保存当前画板'}
+            </button>
+            <button
+              onClick={fetchDrawings}
+              disabled={loadingDrawings}
+              className="px-3 py-2 rounded-lg border border-slate-200 text-sm text-slate-700 hover:bg-slate-100 disabled:text-slate-400 disabled:bg-slate-50"
+            >
+              {loadingDrawings ? '刷新中…' : '刷新列表'}
+            </button>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+            {drawings.map((d) => (
               <button
-                onClick={saveDrawing}
-                disabled={saving}
-                className="px-3 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold disabled:bg-emerald-200 disabled:text-emerald-700"
-              >
-                {saving ? '保存中…' : '保存当前画板'}
-              </button>
-              <button
-                onClick={fetchDrawings}
+                key={d.id}
+                onClick={() => loadDrawing(d.id)}
+                className="text-left border border-slate-200 rounded-lg p-3 hover:border-emerald-400 hover:bg-emerald-50 transition"
                 disabled={loadingDrawings}
-                className="px-3 py-2 rounded-lg border border-slate-200 text-sm text-slate-700 hover:bg-slate-100 disabled:text-slate-400 disabled:bg-slate-50"
               >
-                {loadingDrawings ? '刷新中…' : '刷新列表'}
+                <div className="text-sm font-semibold text-slate-900 truncate">
+                  {d.title || `画板 #${d.id}`}
+                </div>
+                <div className="text-xs text-slate-500">ID: {d.id}</div>
+                <div className="text-xs text-slate-500">命令数：{d.commands?.length || 0}</div>
+                <div className="text-xs text-slate-500">{d.created_at}</div>
               </button>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-              {drawings.map((d) => (
-                <button
-                  key={d.id}
-                  onClick={() => loadDrawing(d.id)}
-                  className="text-left border border-slate-200 rounded-lg p-3 hover:border-emerald-400 hover:bg-emerald-50 transition"
-                  disabled={loadingDrawings}
-                >
-                  <div className="text-sm font-semibold text-slate-900 truncate">
-                    {d.title || `画板 #${d.id}`}
-                  </div>
-                  <div className="text-xs text-slate-500">ID: {d.id}</div>
-                  <div className="text-xs text-slate-500">命令数：{d.commands?.length || 0}</div>
-                  <div className="text-xs text-slate-500">{d.created_at}</div>
-                </button>
-              ))}
-              {!drawings.length && !loadingDrawings && (
-                <div className="text-sm text-slate-500">暂无保存的画板，先保存一份试试。</div>
-              )}
-            </div>
-          </section>
-        )}
+            ))}
+            {!drawings.length && !loadingDrawings && (
+              <div className="text-sm text-slate-500">暂无保存的画板，先保存一份试试。</div>
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-xl border border-slate-200 bg-white shadow-sm p-4 space-y-2">
+          <h2 className="text-sm font-semibold text-slate-900">提示词规范（说话更好画）</h2>
+          <ul className="list-disc pl-5 text-sm text-slate-700 space-y-1">
+            {guidance.map((g) => (
+              <li key={g}>{g}</li>
+            ))}
+          </ul>
+        </section>
       </div>
     </div>
   )
