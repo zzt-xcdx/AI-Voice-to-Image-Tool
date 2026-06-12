@@ -333,9 +333,11 @@ async def call_nlu(asr_text: str) -> VoiceResponse:
     except LLMError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    cleaned = clean_json_response(content)
     try:
-        data = VoiceResponse.model_validate_json(clean_json_response(content))
+        data = VoiceResponse.model_validate_json(cleaned)
     except ValidationError as exc:
+        logger.error(f"LLM JSON 解析失败，raw={content}")
         raise HTTPException(
             status_code=502, detail=f"LLM 输出不符合格式: {exc.errors()}"
         ) from exc

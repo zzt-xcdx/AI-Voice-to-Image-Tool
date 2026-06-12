@@ -1,3 +1,4 @@
+
 # Voice2Canvas（语音绘图 Demo）
 
 训练营 3 天考核脚手架。语音 → ASR → LLM 解析为绘图命令 → 前端 Canvas 执行，全程语音操作（撤销/清空/保存）。
@@ -52,8 +53,15 @@ python run.py
 ## 主要文件
 - 后端：`backend/app/routers/voice.py`（/api/asr-nlu）、`backend/app/main.py`
 - Prompt：`prompts/voice_drawing.md`
-- 前端：`frontend/index.html`
+- 前端：`frontend-react/` (Vite + React)，旧版静态页在 `frontend/index.html`（已废弃）
 - 配置：`.env.example`
+
+## 保存画板（SQLite）
+- 默认路径：`data/drawings.db`（可在 `.env` 配置 `DB_PATH`）
+- 接口：
+  - `POST /api/drawings` 保存：body 包含 `commands`（与 `/api/asr-nlu` 返回一致）、可选 `title/asr_text/reply_text/width/height`
+  - `GET /api/drawings?limit=20` 列表
+  - `GET /api/drawings/{id}` 详情
 
 ## 题目对照
 - 语音绘图：`routers/voice.py` + `prompts/voice_drawing.md` + 前端 Canvas

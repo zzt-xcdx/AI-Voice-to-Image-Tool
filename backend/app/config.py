@@ -1,6 +1,7 @@
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.paths import ENV_FILE
+from app.paths import ENV_FILE, SQLITE_DB
 
 
 class Settings(BaseSettings):
@@ -38,6 +39,7 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     cors_origins: str = "http://localhost:8000,http://127.0.0.1:8000"
+    db_path: str = str(SQLITE_DB)
 
     @property
     def cors_origin_list(self) -> list[str]:

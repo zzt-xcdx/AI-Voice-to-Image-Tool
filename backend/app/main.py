@@ -5,7 +5,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.paths import FRONTEND_DIR
-from app.routers import health, voice
+from app.routers import health, voice, drawings
 
 app = FastAPI(
     title="Voice2Canvas",
@@ -23,6 +23,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(voice.router)
+app.include_router(drawings.router)
 
 if FRONTEND_DIR.exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIR), name="assets")
