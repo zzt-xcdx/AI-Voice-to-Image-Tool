@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Voice2Canvas - 图表</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  </head>
+  <body class="bg-slate-50 text-slate-900">
+    <div class="mx-auto max-w-5xl px-4 py-8 space-y-6">
+      <header class="flex items-center gap-3">
+        <a href="/" class="text-sm text-slate-500 hover:underline">← 返回选择</a>
+        <div>
+          <p class="text-xs uppercase text-indigo-500 font-semibold">模式：图表</p>
+          <h1 class="text-2xl font-bold text-slate-900">语音 → 图表 JSON → ECharts</h1>
+          <p class="text-slate-600 text-sm">支持饼图/柱状/折线，LLM 输出结构化 JSON</p>
+        </div>
+      </header>
+
+      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm space-y-3">
+        <div class="flex items-center gap-2">
+          <button id="btn-record" class="rounded-xl bg-indigo-600 text-white px-4 py-2 text-sm font-semibold hover:bg-indigo-500">开始录音</button>
+          <button id="btn-stop" class="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">停止并发送</button>
+          <span id="status" class="text-xs text-amber-700"></span>
+        </div>
+        <div class="text-xs text-slate-500">也可直接输入文字测试</div>
+        <textarea id="txt" class="w-full rounded-lg border border-slate-200 p-2 text-sm" rows="2" placeholder="示例：画一个饼图，苹果占60%，香蕉25%，橙子15%"></textarea>
+        <div class="text-xs text-slate-500 mt-2">录音中实时文本</div>
+        <div id="live" class="min-h-[36px] rounded-lg border border-slate-100 bg-slate-50 p-2 text-sm text-amber-700"></div>
+        <button id="btn-send-text" class="rounded-lg bg-emerald-600 text-white px-3 py-2 text-sm font-semibold hover:bg-emerald-500">文字测试（图表模式）</button>
+        <div>
+          <div class="text-xs text-slate-500 mb-1">ASR 文本</div>
+          <div id="asr" class="min-h-[36px] rounded-lg border border-slate-100 bg-slate-50 p-2 text-sm text-slate-800"></div>
+        </div>
+        <div>
+          <div class="text-xs text-slate-500 mb-1">LLM 输出 JSON</div>
+          <pre id="chart-json" class="min-h-[100px] rounded-lg border border-slate-100 bg-slate-50 p-2 text-xs text-slate-700 whitespace-pre-wrap"></pre>
+        </div>
+        <div>
+          <div class="text-xs text-slate-500 mb-1">渲染结果</div>
+          <div id="chart-box" class="rounded-lg border border-slate-100 bg-slate-50 min-h-[300px]"></div>
+        </div>
+      </section>
+
+      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm space-y-3">
+        <h2 class="text-sm font-semibold text-slate-900">画板库接口（保存/加载）</h2>
+        <div class="flex flex-wrap items-center gap-2">
+          <input id="title" class="rounded-lg border border-slate-200 px-3 py-2 text-sm" placeholder="保存标题（可选）" />
+          <button id="btn-save" class="rounded-lg bg-emerald-600 text-white px-3 py-2 text-sm font-semibold hover:bg-emerald-500">保存当前图表</button>
+          <button id="btn-list" class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">刷新列表</button>
+        </div>
+        <div id="save-status" class="text-xs text-amber-700"></div>
+        <div id="list" class="grid gap-2 md:grid-cols-2"></div>
+      </section>
+
+      <section class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <h3 class="text-sm font-semibold text-slate-900 mb-2">测试用例</h3>
+        <ul class="list-disc pl-5 text-sm text-slate-700 space-y-1">
+          <li>"画一个饼图，苹果占60%，香蕉占25%，橙子占15%"</li>
+          <li>"画柱状图，一月销售100，二月150，三月120"</li>
+        </ul>
+      </section>
+    </div>
+
+    <script>
+      const apiBase = "";
+      let mediaRecorder = null;
+      let chunks = [];
+      let chartInstance = null;
+      const $ = (id) => document.getElementById(id);
+      const setStatus = (msg, tone = "info") => {
+        const el = $("status");
+        el.textContent = msg || "";
+        el.className = "text-xs " + (tone === "error" ? "text-rose-700" : "text-amber-700");
+      };
+      const buildOption = (spec) => {
+        if (!spec) return null;
+        const type = spec.type || "pie";
+        if (type === "pie") {
+          const labels = spec.labels || [];
+          const series = spec.series && spec.series[0] ? spec.series[0] : { data: [] };
+          const data = (series.data || []).map((v, i) => ({ value: v, name: labels[i] || `项${i + 1}` }));
+          return {
+            title: { text: spec.title || "", left: "center" },
+            tooltip: { trigger: "item" },
+            legend: { top: "5%", left: "center" },
+            series: [{ type: "pie", radius: "60%", data }],
+          };
+        }
+        const labels = spec.labels || [];
+        const series = (spec.series || []).map((s) => ({
+          type: s.type || type,
+          name: s.name || "数据",
+          data: s.data || [],
+        }));
+        return {
+          title: { text: spec.title || "" },
+          tooltip: { trigger: "axis" },
+          xAxis: { type: "category", data: labels },
+          yAxis: { type: "value" },
+          legend: {},
+          series,
+        };
+      };
+      const renderChart = (spec) => {
+        const el = $("chart-box");
+        if (!spec) {
+          el.innerHTML = '<div class="text-slate-400 text-sm p-3">等待图表数据…</div>';
+          return;
+        }
+        const option = buildOption(spec);
+        if (!option) return;
+        if (!chartInstance) chartInstance = echarts.init(el);
+        chartInstance.setOption(option);
+        window.addEventListener("resize", () => chartInstance && chartInstance.resize());
+      };
+      const sendDescribe = async ({ blob, text }) => {
+        const form = new FormData();
+        if (blob) form.append("file", blob, "speech.webm");
+        if (text) form.append("text", text);
+        const res = await fetch(`${apiBase}/api/voice/describe?mode=chart`, { method: "POST", body: form });
+        const t = await res.text();
+        if (!t) throw new Error(res.statusText || "后端无返回");
+        let data;
+        try { data = JSON.parse(t); } catch { throw new Error(`返回非 JSON：${t.slice(0, 120)}`); }
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        return data;
+      };
+      const handleResult = (data) => {
+        $("asr").textContent = data.asr_text || "";
+        $("chart-json").textContent = JSON.stringify(data.chart || {}, null, 2);
+        renderChart(data.chart);
+        window._lastChart = data.chart;
+      };
+      const startRecording = () => {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setStatus("浏览器不支持录音", "error");
+          return;
+        }
+        navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+          chunks = [];
+          mediaRecorder = new MediaRecorder(stream);
+          mediaRecorder.ondataavailable = (e) => {
+            chunks.push(e.data);
+          };
+          // 尝试浏览器本地临时识别（部分浏览器支持）
+          try {
+            const recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (recognition) {
+              const r = new recognition();
+              r.continuous = true;
+              r.interimResults = true;
+              r.lang = "zh-CN";
+              r.onresult = (ev) => {
+                let text = "";
+                for (let i = ev.resultIndex; i < ev.results.length; i++) {
+                  text += ev.results[i][0].transcript;
+                }
+                $("live").textContent = text;
+              };
+              r.onerror = () => {};
+              r.start();
+              mediaRecorder._recognizer = r;
+            } else {
+              $("live").textContent = "录音中…";
+            }
+          } catch (err) {
+            $("live").textContent = "录音中…";
+          }
+          mediaRecorder.onstop = async () => {
+            if (mediaRecorder._recognizer) {
+              try {
+                mediaRecorder._recognizer.stop();
+              } catch (e) {}
+            }
+            const blob = new Blob(chunks, { type: "audio/webm" });
+            setStatus("识别中…");
+            try {
+              const data = await sendDescribe({ blob });
+              handleResult(data);
+              $("live").textContent = "";
+              setStatus("完成");
+            } catch (err) {
+              setStatus(err.message || "错误", "error");
+            }
+          };
+          mediaRecorder.start();
+          setStatus("录音中… 点击停止发送");
+        }).catch((err) => setStatus(err.message || "录音失败", "error"));
+      };
+      const stopRecording = () => {
+        if (mediaRecorder && mediaRecorder.state === "recording") {
+          mediaRecorder.stop();
+        } else {
+          setStatus("没有正在录音的任务");
+        }
+      };
+      const sendText = async () => {
+        const text = $("txt").value;
+        if (!text.trim()) {
+          setStatus("请输入文本", "error");
+          return;
+        }
+        setStatus("LLM 处理中…");
+        try {
+          const data = await sendDescribe({ text });
+          handleResult(data);
+          setStatus("完成");
+        } catch (err) {
+          setStatus(err.message || "错误", "error");
+        }
+      };
+      $("btn-record").onclick = startRecording;
+      $("btn-stop").onclick = stopRecording;
+      $("btn-send-text").onclick = sendText;
+      renderChart(null);
+
+      // --- 保存/加载 ---
+      const listEl = $("list");
+      const saveStatusEl = $("save-status");
+      const setSaveStatus = (msg, tone = "info") => {
+        saveStatusEl.textContent = msg || "";
+        saveStatusEl.className = "text-xs " + (tone === "error" ? "text-rose-700" : "text-amber-700");
+      };
+      const renderList = (items) => {
+        if (!items || !items.length) {
+          listEl.innerHTML = '<div class="text-sm text-slate-500">暂无记录</div>';
+          return;
+        }
+        listEl.innerHTML = items
+          .map(
+            (d) => `
+          <div class="rounded-lg border border-slate-200 p-3 text-sm text-slate-800 space-y-1">
+            <div class="font-semibold truncate">${d.title || `画板 #${d.id}`}</div>
+            <div class="text-xs text-slate-500">ID: ${d.id}</div>
+            <div class="text-xs text-slate-500">命令数：${d.commands?.length || 0}</div>
+            <div class="flex gap-2 pt-1">
+              <button data-id="${d.id}" class="btn-load rounded border border-slate-200 px-2 py-1 text-xs hover:bg-slate-100">加载</button>
+              <button data-id="${d.id}" class="btn-delete rounded border border-rose-200 px-2 py-1 text-xs text-rose-700 hover:bg-rose-50">删除</button>
+            </div>
+          </div>
+        `
+          )
+          .join("");
+      };
+      const fetchList = async () => {
+        setSaveStatus("加载列表…");
+        try {
+          const res = await fetch(`${apiBase}/api/drawings?limit=20`);
+          const t = await res.text();
+          if (!t) throw new Error(res.statusText || "后端无返回");
+          const data = JSON.parse(t);
+          renderList(Array.isArray(data) ? data : []);
+          setSaveStatus("完成");
+        } catch (err) {
+          setSaveStatus(err.message || "错误", "error");
+        }
+      };
+      const saveCurrent = async () => {
+        if (!window._lastChart) {
+          setSaveStatus("暂无生成的图表可保存", "error");
+          return;
+        }
+        const title = $("title").value || "图表";
+        setSaveStatus("保存中…");
+        try {
+          const payload = {
+            title,
+            commands: [{ action: "draw", shape: "text", text: "chart", comment: JSON.stringify(window._lastChart) }],
+            asr_text: $("asr").textContent || "",
+            reply_text: "",
+            background_base64: null,
+          };
+          const res = await fetch(`${apiBase}/api/drawings`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const t = await res.text();
+          if (!t) throw new Error(res.statusText || "后端无返回");
+          const data = JSON.parse(t);
+          if (!res.ok) throw new Error(data.detail || res.statusText);
+          setSaveStatus("已保存");
+          fetchList();
+        } catch (err) {
+          setSaveStatus(err.message || "错误", "error");
+        }
+      };
+      listEl.addEventListener("click", (e) => {
+        const btn = e.target;
+        if (btn.classList.contains("btn-load")) {
+          const id = btn.getAttribute("data-id");
+          setSaveStatus(`加载 ${id}…`);
+          fetch(`${apiBase}/api/drawings/${id}`)
+            .then((res) => res.text().then((t) => ({ ok: res.ok, t })))
+            .then(({ ok, t }) => {
+              if (!t) throw new Error("后端无返回");
+              const data = JSON.parse(t);
+              if (!ok) throw new Error(data.detail || "加载失败");
+              // 取命令里的 comment 当 chart spec
+              const cmds = data.commands || [];
+              const specStr = cmds[0]?.comment || "";
+              try {
+                const spec = JSON.parse(specStr);
+                window._lastChart = spec;
+                $("chart-json").textContent = JSON.stringify(spec, null, 2);
+                renderChart(spec);
+                setSaveStatus("加载完成");
+              } catch (err) {
+                throw new Error("记录中无有效图表数据");
+              }
+            })
+            .catch((err) => setSaveStatus(err.message || "错误", "error"));
+        } else if (btn.classList.contains("btn-delete")) {
+          const id = btn.getAttribute("data-id");
+          if (!confirm(`确认删除 ${id}？`)) return;
+          setSaveStatus(`删除 ${id}…`);
+          fetch(`${apiBase}/api/drawings/${id}`, { method: "DELETE" })
+            .then((res) => {
+              if (!res.ok) return res.text().then((t) => Promise.reject(t || res.statusText));
+            })
+            .then(() => {
+              setSaveStatus("已删除");
+              fetchList();
+            })
+            .catch((err) => setSaveStatus(err || "错误", "error"));
+        }
+      });
+      $("btn-save").onclick = saveCurrent;
+      $("btn-list").onclick = fetchList;
+      fetchList();
+    </script>
+  </body>
+</html>
