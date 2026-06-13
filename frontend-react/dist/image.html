@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Voice2Canvas - AI 画图</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="bg-slate-50 text-slate-900">
+    <div class="mx-auto max-w-5xl px-4 py-8 space-y-6">
+      <header class="flex items-center gap-3">
+        <a href="/" class="text-sm text-slate-500 hover:underline">← 返回选择</a>
+        <div>
+          <p class="text-xs uppercase text-emerald-500 font-semibold">模式：AI 画图</p>
+          <h1 class="text-2xl font-bold text-slate-900">提示词润色 + Qianfan 生图</h1>
+          <p class="text-slate-600 text-sm">语音/文字 → LLM 英文提示词 → 图片生成</p>
+        </div>
+      </header>
+
+      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm space-y-3">
+        <div class="flex items-center gap-2">
+          <button id="btn-record" class="rounded-xl bg-slate-900 text-white px-4 py-2 text-sm font-semibold hover:bg-slate-800">开始录音</button>
+          <button id="btn-stop" class="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">停止并发送</button>
+          <span id="status" class="text-xs text-amber-700"></span>
+        </div>
+          <div class="text-xs text-slate-500">也可直接输入文字测试</div>
+          <textarea id="txt" class="w-full rounded-lg border border-slate-200 p-2 text-sm" rows="2" placeholder="示例：画一只在宇宙中漂浮的宇航员猫咪"></textarea>
+          <div class="text-xs text-slate-500 mt-2">录音中实时文本</div>
+          <div id="live" class="min-h-[36px] rounded-lg border border-slate-100 bg-slate-50 p-2 text-sm text-amber-700"></div>
+        <button id="btn-send-text" class="rounded-lg bg-emerald-600 text-white px-3 py-2 text-sm font-semibold hover:bg-emerald-500">文字测试（图片模式）</button>
+        <div>
+          <div class="text-xs text-slate-500 mb-1">ASR 文本</div>
+          <div id="asr" class="min-h-[36px] rounded-lg border border-slate-100 bg-slate-50 p-2 text-sm text-slate-800"></div>
+        </div>
+        <div>
+          <div class="text-xs text-slate-500 mb-1">LLM 优化英文提示词</div>
+          <div id="prompt-en" class="min-h-[36px] rounded-lg border border-slate-100 bg-slate-50 p-2 text-sm text-emerald-700"></div>
+        </div>
+        <div>
+          <div class="text-xs text-slate-500 mb-1">生成图片</div>
+          <div id="img-box" class="rounded-lg border border-slate-100 bg-slate-50 p-3 flex items-center justify-center min-h-[280px]">
+            <span class="text-slate-400 text-sm">等待生成…</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm space-y-3">
+        <h2 class="text-sm font-semibold text-slate-900">画板库接口（保存/加载）</h2>
+        <div class="flex flex-wrap items-center gap-2">
+          <input id="title" class="rounded-lg border border-slate-200 px-3 py-2 text-sm" placeholder="保存标题（可选）" />
+          <button id="btn-save" class="rounded-lg bg-emerald-600 text-white px-3 py-2 text-sm font-semibold hover:bg-emerald-500">保存当前图片</button>
+          <button id="btn-list" class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">刷新列表</button>
+        </div>
+        <div id="save-status" class="text-xs text-amber-700"></div>
+        <div id="list" class="grid gap-2 md:grid-cols-2"></div>
+      </section>
+
+      <section class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <h3 class="text-sm font-semibold text-slate-900 mb-2">测试用例</h3>
+        <ul class="list-disc pl-5 text-sm text-slate-700 space-y-1">
+          <li>"画一只在宇宙中漂浮的宇航员猫咪"</li>
+          <li>"一个赛博朋克风格的城市夜景"</li>
+        </ul>
+      </section>
+    </div>
+
+    <script>
+      const apiBase = "";
+      let mediaRecorder = null;
+      let chunks = [];
+      const $ = (id) => document.getElementById(id);
+      const setStatus = (msg, tone = "info") => {
+        const el = $("status");
+        el.textContent = msg || "";
+        el.className = "text-xs " + (tone === "error" ? "text-rose-700" : "text-amber-700");
+      };
+      const renderImage = (b64) => {
+        const box = $("img-box");
+        if (!b64) {
+          box.innerHTML = '<span class="text-slate-400 text-sm">等待生成…</span>';
+          return;
+        }
+        box.innerHTML = '<img class="max-h-[360px] rounded-lg shadow" src="data:image/png;base64,' + b64 + '" />';
+      };
+      const sendDescribe = async ({ blob, text }) => {
+        const form = new FormData();
+        if (blob) form.append("file", blob, "speech.webm");
+        if (text) form.append("text", text);
+        const res = await fetch(`${apiBase}/api/voice/describe?mode=image`, { method: "POST", body: form });
+        const t = await res.text();
+        if (!t) throw new Error(res.statusText || "后端无返回");
+        let data;
+        try { data = JSON.parse(t); } catch { throw new Error(`返回非 JSON：${t.slice(0, 120)}`); }
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        return data;
+      };
+      const handleResult = (data) => {
+        $("asr").textContent = data.asr_text || "";
+        $("prompt-en").textContent = data.prompt_en || "";
+        renderImage(data.image_base64);
+        window._lastImage = data;
+      };
+      const startRecording = () => {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setStatus("浏览器不支持录音", "error");
+          return;
+        }
+        navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+          chunks = [];
+          mediaRecorder = new MediaRecorder(stream);
+          mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+          mediaRecorder.ondataavailable = (e) => {
+            chunks.push(e.data);
+          };
+          // 尝试使用浏览器的临时识别（仅限部分浏览器），如果不可用则显示录音中占位
+          try {
+            const recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (recognition) {
+              const r = new recognition();
+              r.continuous = true;
+              r.interimResults = true;
+              r.lang = "zh-CN";
+              r.onresult = (ev) => {
+                let text = "";
+                for (let i = ev.resultIndex; i < ev.results.length; i++) {
+                  text += ev.results[i][0].transcript;
+                }
+                $("live").textContent = text;
+              };
+              r.onerror = () => {};
+              r.start();
+              mediaRecorder._recognizer = r;
+            } else {
+              $("live").textContent = "录音中…";
+            }
+          } catch (err) {
+            $("live").textContent = "录音中…";
+          }
+          mediaRecorder.onstop = async () => {
+            if (mediaRecorder._recognizer) {
+              try {
+                mediaRecorder._recognizer.stop();
+              } catch (e) {}
+            }
+            const blob = new Blob(chunks, { type: "audio/webm" });
+            setStatus("识别中…");
+            try {
+              const data = await sendDescribe({ blob });
+              handleResult(data);
+              $("live").textContent = "";
+              setStatus("完成");
+            } catch (err) {
+              setStatus(err.message || "错误", "error");
+            }
+          };
+          mediaRecorder.start();
+          setStatus("录音中… 点击停止发送");
+        }).catch((err) => setStatus(err.message || "录音失败", "error"));
+      };
+      const stopRecording = () => {
+        if (mediaRecorder && mediaRecorder.state === "recording") {
+          mediaRecorder.stop();
+        } else {
+          setStatus("没有正在录音的任务");
+        }
+      };
+      const sendText = async () => {
+        const text = $("txt").value;
+        if (!text.trim()) {
+          setStatus("请输入文本", "error");
+          return;
+        }
+        setStatus("LLM 处理中…");
+        try {
+          const data = await sendDescribe({ text });
+          handleResult(data);
+          setStatus("完成");
+        } catch (err) {
+          setStatus(err.message || "错误", "error");
+        }
+      };
+      $("btn-record").onclick = startRecording;
+      $("btn-stop").onclick = stopRecording;
+      $("btn-send-text").onclick = sendText;
+      renderImage("");
+
+      // --- 保存/加载 ---
+      const listEl = $("list");
+      const saveStatusEl = $("save-status");
+      const setSaveStatus = (msg, tone = "info") => {
+        saveStatusEl.textContent = msg || "";
+        saveStatusEl.className = "text-xs " + (tone === "error" ? "text-rose-700" : "text-amber-700");
+      };
+      const renderList = (items) => {
+        if (!items || !items.length) {
+          listEl.innerHTML = '<div class="text-sm text-slate-500">暂无记录</div>';
+          return;
+        }
+        listEl.innerHTML = items
+          .map(
+            (d) => `
+          <div class="rounded-lg border border-slate-200 p-3 text-sm text-slate-800 space-y-1">
+            <div class="font-semibold truncate">${d.title || `画板 #${d.id}`}</div>
+            <div class="text-xs text-slate-500">ID: ${d.id}</div>
+            <div class="text-xs text-slate-500">命令数：${d.commands?.length || 0}</div>
+            <div class="flex gap-2 pt-1">
+              <button data-id="${d.id}" class="btn-load rounded border border-slate-200 px-2 py-1 text-xs hover:bg-slate-100">加载</button>
+              <button data-id="${d.id}" class="btn-delete rounded border border-rose-200 px-2 py-1 text-xs text-rose-700 hover:bg-rose-50">删除</button>
+            </div>
+          </div>
+        `
+          )
+          .join("");
+      };
+      const fetchList = async () => {
+        setSaveStatus("加载列表…");
+        try {
+          const res = await fetch(`${apiBase}/api/drawings?limit=20`);
+          const t = await res.text();
+          if (!t) throw new Error(res.statusText || "后端无返回");
+          const data = JSON.parse(t);
+          renderList(Array.isArray(data) ? data : []);
+          setSaveStatus("完成");
+        } catch (err) {
+          setSaveStatus(err.message || "错误", "error");
+        }
+      };
+      const saveCurrent = async () => {
+        const img = window._lastImage?.image_base64;
+        if (!img) {
+          setSaveStatus("暂无生成的图片可保存", "error");
+          return;
+        }
+        const title = $("title").value || "AI图片";
+        setSaveStatus("保存中…");
+        try {
+          const payload = {
+            title,
+            commands: [],
+            asr_text: window._lastImage?.asr_text || "",
+            reply_text: window._lastImage?.prompt_en || "",
+            background_base64: `data:image/png;base64,${img}`,
+          };
+          const res = await fetch(`${apiBase}/api/drawings`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const t = await res.text();
+          if (!t) throw new Error(res.statusText || "后端无返回");
+          const data = JSON.parse(t);
+          if (!res.ok) throw new Error(data.detail || res.statusText);
+          setSaveStatus("已保存");
+          fetchList();
+        } catch (err) {
+          setSaveStatus(err.message || "错误", "error");
+        }
+      };
+      listEl.addEventListener("click", (e) => {
+        const btn = e.target;
+        if (btn.classList.contains("btn-load")) {
+          const id = btn.getAttribute("data-id");
+          setSaveStatus(`加载 ${id}…`);
+          fetch(`${apiBase}/api/drawings/${id}`)
+            .then((res) => res.text().then((t) => ({ ok: res.ok, t })))
+            .then(({ ok, t }) => {
+              if (!t) throw new Error("后端无返回");
+              const data = JSON.parse(t);
+              if (!ok) throw new Error(data.detail || "加载失败");
+              if (data.background_base64) {
+                window._lastImage = { image_base64: data.background_base64.replace(/^data:image\/png;base64,/, ""), asr_text: data.asr_text };
+                renderImage(window._lastImage.image_base64);
+              }
+              setSaveStatus("加载完成");
+            })
+            .catch((err) => setSaveStatus(err.message || "错误", "error"));
+        } else if (btn.classList.contains("btn-delete")) {
+          const id = btn.getAttribute("data-id");
+          if (!confirm(`确认删除 ${id}？`)) return;
+          setSaveStatus(`删除 ${id}…`);
+          fetch(`${apiBase}/api/drawings/${id}`, { method: "DELETE" })
+            .then((res) => {
+              if (!res.ok) return res.text().then((t) => Promise.reject(t || res.statusText));
+            })
+            .then(() => {
+              setSaveStatus("已删除");
+              fetchList();
+            })
+            .catch((err) => setSaveStatus(err || "错误", "error"));
+        }
+      });
+      $("btn-save").onclick = saveCurrent;
+      $("btn-list").onclick = fetchList;
+      fetchList();
+    </script>
+  </body>
+</html>

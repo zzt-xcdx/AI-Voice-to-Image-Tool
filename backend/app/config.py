@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com/v1"
     llm_model: str = "deepseek-chat"
-    llm_timeout: float = 120.0
+    llm_timeout: float = 60.0
 
     # ASR
     asr_vendor: str = "baidu_rest"  # baidu_rest | xfyun
@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     cors_origins: str = "http://localhost:8000,http://127.0.0.1:8000"
+
+    # Image generation (Qianfan)
+    image_api_key: str = ""
+    image_model: str = "qwen-image"
+    image_timeout: float = 60.0
 
     @property
     def cors_origin_list(self) -> list[str]:

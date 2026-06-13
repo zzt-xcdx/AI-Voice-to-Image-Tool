@@ -1,11 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.paths import FRONTEND_DIR
-from app.routers import health, voice
+from app.paths import FRONTEND_DIR, FRONTEND_DIST
+from app.routers import health, voice, describe
 
 app = FastAPI(
     title="Voice2Canvas",
@@ -23,11 +22,10 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(voice.router)
+app.include_router(describe.router)
 
-if FRONTEND_DIR.exists():
-    app.mount("/assets", StaticFiles(directory=FRONTEND_DIR), name="assets")
-
-
-@app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(FRONTEND_DIR / "index.html")
+# 静态前端：优先使用 frontend-react/dist，开启 html=True 以支持 /image.html 等路径
+if FRONTEND_DIST.exists():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend-dist")
+elif FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
