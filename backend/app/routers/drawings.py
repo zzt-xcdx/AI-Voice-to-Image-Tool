@@ -239,6 +239,34 @@ async def _delete_drawing(drawing_id: int) -> None:
     return await run_in_threadpool(_work)
 
 
+# 供内部调用的轻量创建（无需 Command 校验），如自动保存图片
+async def create_drawing_from_payload(raw: dict[str, Any]) -> int:
+    def _work() -> int:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO drawings (title, commands_json, asr_text, reply_text, width, height, background_base64)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    raw.get("title") or "未命名",
+                    json.dumps(raw.get("commands") or [], ensure_ascii=False),
+                    raw.get("asr_text"),
+                    raw.get("reply_text"),
+                    raw.get("width"),
+                    raw.get("height"),
+                    raw.get("background_base64"),
+                ),
+            )
+            conn.commit()
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+    return await run_in_threadpool(_work)
+
+
 @router.post("", response_model=DrawingOut)
 async def save_drawing(payload: DrawingCreate) -> DrawingOut:
     if not payload.commands and not payload.background_base64:

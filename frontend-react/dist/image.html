@@ -19,9 +19,8 @@
 
       <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm space-y-3">
         <div class="flex items-center gap-2">
-          <button id="btn-record" class="rounded-xl bg-slate-900 text-white px-4 py-2 text-sm font-semibold hover:bg-slate-800">开始录音</button>
-          <button id="btn-stop" class="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">停止并发送</button>
-          <span id="status" class="text-xs text-amber-700"></span>
+          <div class="text-xs text-slate-500">状态</div>
+          <span id="status" class="text-xs text-amber-700">未开启监听</span>
         </div>
           <div class="text-xs text-slate-500">也可直接输入文字测试</div>
           <textarea id="txt" class="w-full rounded-lg border border-slate-200 p-2 text-sm" rows="2" placeholder="示例：画一只在宇宙中漂浮的宇航员猫咪"></textarea>
@@ -100,70 +99,182 @@
         renderImage(data.image_base64);
         window._lastImage = data;
       };
-      const startRecording = () => {
+      // --- 语音悬浮球与自动 VAD ---
+      let audioCtx = null;
+      let sourceNode = null;
+      let processorNode = null;
+      let vadEnabled = false;
+      let isSpeaking = false;
+      let silenceCount = 0;
+      let energyThreshold = 0.01; // 初始阈值，后续自适应
+      let recognizer = null;
+
+      const attachRecognizer = () => {
+        try {
+          const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+          if (!Recognition) return null;
+          const r = new Recognition();
+          r.continuous = true;
+          r.interimResults = true;
+          r.lang = "zh-CN";
+          r.onresult = (ev) => {
+            let text = "";
+            for (let i = ev.resultIndex; i < ev.results.length; i++) {
+              text += ev.results[i][0].transcript;
+            }
+            $("live").textContent = text;
+          };
+          r.onerror = () => {};
+          r.start();
+          return r;
+        } catch (e) {
+          return null;
+        }
+      };
+
+      const stopRecognizer = () => {
+        if (recognizer) {
+          try {
+            recognizer.stop();
+          } catch (e) {}
+          recognizer = null;
+        }
+      };
+
+      const stopMediaRecorder = async () => {
+        if (mediaRecorder && mediaRecorder.state === "recording") {
+          return new Promise((resolve) => {
+            mediaRecorder.onstop = resolve;
+            mediaRecorder.stop();
+          });
+        }
+        return Promise.resolve();
+      };
+
+      const teardownAudio = async () => {
+        await stopMediaRecorder();
+        stopRecognizer();
+        if (processorNode) processorNode.disconnect();
+        if (sourceNode) sourceNode.disconnect();
+        if (audioCtx) audioCtx.close();
+        processorNode = null;
+        sourceNode = null;
+        audioCtx = null;
+      };
+
+      const startListening = async () => {
+        if (vadEnabled) return;
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           setStatus("浏览器不支持录音", "error");
           return;
         }
-        navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
           chunks = [];
           mediaRecorder = new MediaRecorder(stream);
           mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
-          mediaRecorder.ondataavailable = (e) => {
-            chunks.push(e.data);
-          };
-          // 尝试使用浏览器的临时识别（仅限部分浏览器），如果不可用则显示录音中占位
-          try {
-            const recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-            if (recognition) {
-              const r = new recognition();
-              r.continuous = true;
-              r.interimResults = true;
-              r.lang = "zh-CN";
-              r.onresult = (ev) => {
-                let text = "";
-                for (let i = ev.resultIndex; i < ev.results.length; i++) {
-                  text += ev.results[i][0].transcript;
-                }
-                $("live").textContent = text;
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          sourceNode = audioCtx.createMediaStreamSource(stream);
+          processorNode = audioCtx.createScriptProcessor(2048, 1, 1);
+          sourceNode.connect(processorNode);
+          processorNode.connect(audioCtx.destination);
+
+          let noiseFloor = 0;
+          let frameCount = 0;
+
+          processorNode.onaudioprocess = (e) => {
+            const input = e.inputBuffer.getChannelData(0);
+            let sum = 0;
+            for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+            const rms = Math.sqrt(sum / input.length);
+
+            // 动态估计噪声底
+            if (frameCount < 50) {
+              noiseFloor = (noiseFloor * frameCount + rms) / (frameCount + 1);
+              energyThreshold = Math.max(0.01, noiseFloor * 3.5);
+              frameCount++;
+            }
+
+            if (!isSpeaking && rms > energyThreshold) {
+              // 进入语音段
+              isSpeaking = true;
+              silenceCount = 0;
+              chunks = [];
+              mediaRecorder.start();
+              recognizer = attachRecognizer();
+              setStatus("检测到语音，录音中…");
+            } else if (isSpeaking) {
+              if (rms > energyThreshold * 0.6) {
+                silenceCount = 0;
+              } else {
+                silenceCount++;
+              }
+              // 静音超过一定帧数认为结束
+            if (silenceCount > 15) {
+                isSpeaking = false;
+                silenceCount = 0;
+              stopRecognizer();
+              setStatus("上传识别中…");
+              mediaRecorder.onstop = () => {
+                const blob = new Blob(chunks, { type: "audio/webm" });
+                chunks = [];
+                sendDescribe({ blob })
+                  .then((data) => {
+                    setStatus("正在生成图片…");
+                    handleResult(data);
+                    $("live").textContent = "";
+                    setStatus("完成");
+                  })
+                  .catch((err) => setStatus(err.message || "错误", "error"));
               };
-              r.onerror = () => {};
-              r.start();
-              mediaRecorder._recognizer = r;
-            } else {
-              $("live").textContent = "录音中…";
-            }
-          } catch (err) {
-            $("live").textContent = "录音中…";
-          }
-          mediaRecorder.onstop = async () => {
-            if (mediaRecorder._recognizer) {
-              try {
-                mediaRecorder._recognizer.stop();
-              } catch (e) {}
-            }
-            const blob = new Blob(chunks, { type: "audio/webm" });
-            setStatus("识别中…");
-            try {
-              const data = await sendDescribe({ blob });
-              handleResult(data);
-              $("live").textContent = "";
-              setStatus("完成");
-            } catch (err) {
-              setStatus(err.message || "错误", "error");
+              mediaRecorder.stop();
+              }
             }
           };
-          mediaRecorder.start();
-          setStatus("录音中… 点击停止发送");
-        }).catch((err) => setStatus(err.message || "录音失败", "error"));
-      };
-      const stopRecording = () => {
-        if (mediaRecorder && mediaRecorder.state === "recording") {
-          mediaRecorder.stop();
-        } else {
-          setStatus("没有正在录音的任务");
+
+          vadEnabled = true;
+          setStatus("监听中：请开始说话");
+        } catch (err) {
+          setStatus(err?.message || "麦克风开启失败", "error");
         }
       };
+
+      const stopListening = async () => {
+        vadEnabled = false;
+        await teardownAudio();
+        setStatus("未开启监听");
+      };
+
+      // 悬浮球控制
+      const bubble = document.createElement("button");
+      bubble.id = "voice-bubble";
+      bubble.style.position = "fixed";
+      bubble.style.bottom = "18px";
+      bubble.style.right = "18px";
+      bubble.style.width = "64px";
+      bubble.style.height = "64px";
+      bubble.style.borderRadius = "50%";
+      bubble.style.background = "#0f172a";
+      bubble.style.color = "#fff";
+      bubble.style.boxShadow = "0 12px 24px rgba(15,23,42,0.25)";
+      bubble.style.border = "none";
+      bubble.style.cursor = "pointer";
+      bubble.style.fontWeight = "700";
+      bubble.style.fontSize = "12px";
+      bubble.textContent = "语音 Off";
+      bubble.onclick = async () => {
+        if (vadEnabled) {
+          bubble.textContent = "语音 Off";
+          bubble.style.background = "#0f172a";
+          await stopListening();
+          // 保持当前状态栏文案（不清空），仅提示语音已关闭
+        } else {
+          bubble.textContent = "语音 On";
+          bubble.style.background = "#059669";
+          startListening();
+        }
+      };
+      document.body.appendChild(bubble);
       const sendText = async () => {
         const text = $("txt").value;
         if (!text.trim()) {
