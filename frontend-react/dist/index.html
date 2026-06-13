@@ -12,6 +12,7 @@
         <p class="text-sm text-emerald-600 font-semibold">语音 → LLM → 图片 / 图表</p>
         <h1 class="text-3xl font-bold text-slate-900 mt-1">Voice2Canvas</h1>
         <p class="text-slate-600 mt-2 text-sm">请选择模式进入：AI 画图（提示词润色）或 图表（ECharts 渲染）。</p>
+        <div id="voice-status" class="mt-2 text-xs text-amber-700">语音未开启</div>
       </header>
 
       <section class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -62,5 +63,142 @@
         </a>
       </section>
     </div>
+
+    <script>
+      // 语音悬浮球：主页语音导航
+      let listening = false;
+      let recognition = null;
+      const statusEl = document.getElementById("voice-status");
+      const setStatus = (msg, tone = "info") => {
+        statusEl.textContent = msg;
+        statusEl.className = "mt-2 text-xs " + (tone === "error" ? "text-rose-700" : "text-amber-700");
+      };
+
+      const autoCorrect = (t) => {
+        let text = (t || "").toLowerCase();
+        const corrections = [
+          ["图标", "图表"],
+          ["涂表", "图表"],
+          ["图表功能", "图表"],
+          ["chart", "图表"],
+          ["echart", "图表"],
+          ["一查特", "图表"],
+          ["易差", "图表"],
+          ["ai画图", "ai画图"],
+          ["爱画图", "ai画图"],
+          ["生兔", "生图"],
+          ["生图", "生图"],
+          ["ai生图", "ai画图"],
+          ["ai 生成图片", "ai画图"],
+          ["画板功能", "画板"],
+        ];
+        corrections.forEach(([k, v]) => {
+          if (text.includes(k.toLowerCase())) {
+            text = text.replace(k.toLowerCase(), v.toLowerCase());
+          }
+        });
+        return text;
+      };
+      const normalizeText = (t) => autoCorrect(t);
+      const routeByText = (t) => {
+        const text = normalizeText(t);
+        if (text.includes("画板")) {
+          setStatus("进入画板库…");
+          window.location.href = "/drawings.html";
+          return true;
+        }
+        if (text.includes("图表") || text.includes("chart") || text.includes("echarts")) {
+          setStatus("进入图表功能…");
+          window.location.href = "/chart.html";
+          return true;
+        }
+        if (text.includes("画图") || text.includes("ai") || text.includes("生图")) {
+          setStatus("进入 AI 画图…");
+          window.location.href = "/image.html";
+          return true;
+        }
+        return false;
+      };
+
+      const startVoiceNav = () => {
+        try {
+          const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+          if (!Recognition) {
+            setStatus("浏览器不支持语音识别", "error");
+            return;
+          }
+          recognition = new Recognition();
+          recognition.continuous = true;
+          recognition.interimResults = true;
+          recognition.lang = "zh-CN";
+
+          recognition.onstart = () => setStatus("监听中：说“AI画图”或“图表功能”进入");
+          recognition.onerror = (e) => setStatus(`语音错误：${e.error || "unknown"}`, "error");
+          recognition.onend = () => {
+            if (listening) recognition.start(); // 自动重启
+          };
+          recognition.onresult = (ev) => {
+            let finalText = "";
+            for (let i = ev.resultIndex; i < ev.results.length; i++) {
+              const res = ev.results[i];
+              const txt = res[0].transcript.trim();
+              if (res.isFinal) {
+                finalText += txt;
+              }
+            }
+            if (finalText) {
+              const corrected = normalizeText(finalText);
+              const routed = routeByText(corrected);
+              if (!routed) setStatus(`未识别入口：${corrected}（原始：${finalText}）`);
+            }
+          };
+          recognition.start();
+          listening = true;
+        } catch (e) {
+          setStatus(e?.message || "语音启动失败", "error");
+        }
+      };
+
+      const stopVoiceNav = () => {
+        listening = false;
+        if (recognition) {
+          try {
+            recognition.stop();
+          } catch (e) {}
+          recognition = null;
+        }
+        setStatus("语音未开启");
+      };
+
+      // 悬浮球
+      const bubble = document.createElement("button");
+      bubble.id = "voice-bubble";
+      bubble.style.position = "fixed";
+      bubble.style.bottom = "18px";
+      bubble.style.right = "18px";
+      bubble.style.width = "64px";
+      bubble.style.height = "64px";
+      bubble.style.borderRadius = "50%";
+      bubble.style.background = "#0f172a";
+      bubble.style.color = "#fff";
+      bubble.style.boxShadow = "0 12px 24px rgba(15,23,42,0.25)";
+      bubble.style.border = "none";
+      bubble.style.cursor = "pointer";
+      bubble.style.fontWeight = "700";
+      bubble.style.fontSize = "12px";
+      bubble.textContent = "语音 Off";
+      bubble.onclick = () => {
+        if (listening) {
+          bubble.textContent = "语音 Off";
+          bubble.style.background = "#0f172a";
+          stopVoiceNav();
+        } else {
+          bubble.textContent = "语音 On";
+          bubble.style.background = "#059669";
+          startVoiceNav();
+        }
+      };
+      document.body.appendChild(bubble);
+    </script>
   </body>
 </html>
