@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.paths import FRONTEND_DIR, FRONTEND_DIST
-from app.routers import health, voice, describe
+from app.routers import health, voice, describe, drawings
 
 app = FastAPI(
     title="Voice2Canvas",
@@ -23,6 +23,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(voice.router)
 app.include_router(describe.router)
+app.include_router(drawings.router)
 
 # 静态前端：优先使用 frontend-react/dist，开启 html=True 以支持 /image.html 等路径
 if FRONTEND_DIST.exists():

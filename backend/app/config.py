@@ -1,6 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.paths import ENV_FILE
+from app.paths import ENV_FILE, SQLITE_DB
 
 
 class Settings(BaseSettings):
@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     image_api_key: str = ""
     image_model: str = "qwen-image"
     image_timeout: float = 60.0
+
+    # Database
+    db_path: str = str(SQLITE_DB)
 
     @property
     def cors_origin_list(self) -> list[str]:
