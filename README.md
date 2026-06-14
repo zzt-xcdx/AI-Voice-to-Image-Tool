@@ -4,6 +4,8 @@
 
 bilibili:https://www.bilibili.com/video/BV1fqJw6WEYf/?spm_id_from=333.1387.homepage.video_card.click&vd_source=8a035e308519ac60a7a4d83c6c575bab
 
+docs/DESIGN.md 设计文档
+
 ## 功能概览
 - **双模式生成**
   - 图片：口语 → LLM 提示词润色 → Qianfan 生图。
