@@ -26,7 +26,10 @@
           <textarea id="txt" class="w-full rounded-lg border border-slate-200 p-2 text-sm" rows="2" placeholder="示例：画一只在宇宙中漂浮的宇航员猫咪"></textarea>
           <div class="text-xs text-slate-500 mt-2">录音中实时文本</div>
           <div id="live" class="min-h-[36px] rounded-lg border border-slate-100 bg-slate-50 p-2 text-sm text-amber-700"></div>
-        <button id="btn-send-text" class="rounded-lg bg-emerald-600 text-white px-3 py-2 text-sm font-semibold hover:bg-emerald-500">文字测试（图片模式）</button>
+        <div class="flex flex-wrap gap-2">
+          <button id="btn-send-text" class="rounded-lg bg-emerald-600 text-white px-3 py-2 text-sm font-semibold hover:bg-emerald-500">文字测试（图片模式）</button>
+          <button id="btn-retry" class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100" style="display:none;">重试上一条</button>
+        </div>
         <div>
           <div class="text-xs text-slate-500 mb-1">ASR 文本</div>
           <div id="asr" class="min-h-[36px] rounded-lg border border-slate-100 bg-slate-50 p-2 text-sm text-slate-800"></div>
@@ -81,10 +84,16 @@
         }
         box.innerHTML = '<img class="max-h-[360px] rounded-lg shadow" src="data:image/png;base64,' + b64 + '" />';
       };
+      let lastPayload = null;
       const sendDescribe = async ({ blob, text }) => {
         const form = new FormData();
-        if (blob) form.append("file", blob, "speech.webm");
+        if (blob) {
+          if (blob.size === 0) throw new Error("未录到音频");
+          form.append("file", blob, "speech.webm");
+        }
         if (text) form.append("text", text);
+        lastPayload = { blob, text };
+        setStatus(blob ? "上传音频…": "提交文本…");
         const res = await fetch(`${apiBase}/api/voice/describe?mode=image`, { method: "POST", body: form });
         const t = await res.text();
         if (!t) throw new Error(res.statusText || "后端无返回");
@@ -98,6 +107,7 @@
         $("prompt-en").textContent = data.prompt_en || "";
         renderImage(data.image_base64);
         window._lastImage = data;
+        $("btn-retry").style.display = lastPayload ? "inline-flex" : "none";
       };
       // --- 语音悬浮球与自动 VAD ---
       let audioCtx = null;
@@ -218,9 +228,10 @@
               mediaRecorder.onstop = () => {
                 const blob = new Blob(chunks, { type: "audio/webm" });
                 chunks = [];
+                setStatus("上传识别中…");
                 sendDescribe({ blob })
                   .then((data) => {
-                    setStatus("正在生成图片…");
+                    setStatus("LLM 生成提示词…");
                     handleResult(data);
                     $("live").textContent = "";
                     setStatus("完成");
@@ -290,9 +301,23 @@
           setStatus(err.message || "错误", "error");
         }
       };
-      $("btn-record").onclick = startRecording;
-      $("btn-stop").onclick = stopRecording;
+      const retryLast = async () => {
+        if (!lastPayload) {
+          setStatus("暂无可重试的内容", "error");
+          return;
+        }
+        setStatus("重试中…");
+        try {
+          const data = await sendDescribe(lastPayload);
+          handleResult(data);
+          setStatus("完成");
+        } catch (err) {
+          setStatus(err.message || "错误", "error");
+        }
+      };
+
       $("btn-send-text").onclick = sendText;
+      $("btn-retry").onclick = retryLast;
       renderImage("");
 
       // --- 保存/加载 ---
