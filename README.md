@@ -2,6 +2,8 @@
 
 > 纯语音驱动的 AI 生图 & 图表生成。开口即用，无需点击，支持语音导航、生成、导出与历史管理。
 
+bilibili:https://www.bilibili.com/video/BV1fqJw6WEYf/?spm_id_from=333.1387.homepage.video_card.click&vd_source=8a035e308519ac60a7a4d83c6c575bab
+
 ## 功能概览
 - **双模式生成**
   - 图片：口语 → LLM 提示词润色 → Qianfan 生图。
@@ -25,7 +27,6 @@
 ### 环境
 - Python 3.10+
 - Node 18+（仅在重构前端时需要）
-- Qianfan 图像 API Key（生图）
 
 ### 安装与运行
 ```bash
@@ -81,7 +82,7 @@ QINIU/
 ├── prompts/
 │   └── voice_drawing.md         # LLM 提示词模板（图片/图表双模式）
 ├── data/
-│   └── drawings.db              # SQLite 记录（建议忽略版本控制）
+│   └── drawings.db              # SQLite 记录
 ├── README.md
 ├── .env.example
 └── run.py
@@ -109,6 +110,4 @@ QINIU/
 
 ## 已知限制 & 后续可做
 - Web Speech API 在部分浏览器兼容性有限，若需更稳可强制使用后端 ASR。
-- 列表操作虽有语音口令，但按钮仍保留；若需“彻底免点击”可隐藏按钮并强化语音确认。
-- 未写单独的设计文档（可新增 `docs/VOICE_TOOL_DESIGN.md` 说明支持指令/未完成项）。
 

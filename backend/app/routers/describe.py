@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 from typing import Literal
 
 import httpx
@@ -8,7 +9,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.config import settings
 from app.paths import PROMPTS_DIR
-from app.routers.voice import call_asr, clean_json_response
+from app.services.asr import call_asr, clean_json_response
 from app.services.llm import LLMError, chat_completion
 
 
@@ -31,19 +32,9 @@ class ChartSeries(BaseModel):
 class ChartSpec(BaseModel):
     type: Literal["pie", "bar", "line"]
     title: str | None = None
-    labels: list[str] | None = None  # x 轴/类别
+    labels: list[str] | None = None
     series: list[ChartSeries] = Field(default_factory=list)
     note: str | None = None
-
-
-class AsrResponse(BaseModel):
-    asr_text: str
-
-
-class GenerateImageRequest(BaseModel):
-    prompt_en: str = Field(..., min_length=3)
-    prompt_cn: str | None = None
-    asr_text: str | None = None
 
 
 class DescribeResponse(BaseModel):
@@ -55,7 +46,7 @@ class DescribeResponse(BaseModel):
     merged_prompt_en: str | None = None
     chart: ChartSpec | None = None
     image_base64: str | None = None
-    stage: Literal["prompt", "full"] | None = None
+    drawing_id: int | None = None
 
 
 def load_prompt(mode: Literal["image", "chart"]) -> str:
@@ -63,13 +54,27 @@ def load_prompt(mode: Literal["image", "chart"]) -> str:
     if not prompt_path.exists():
         return "You are a voice assistant. Return strict JSON."
     base = prompt_path.read_text(encoding="utf-8")
-    # 在提示尾部追加模式指示，降低歧义
     extra = (
         "\n\n当前模式: IMAGE。输出示例: {\"prompt_en\": \"A cat on the moon\", \"prompt_cn\": \"...\"}"
         if mode == "image"
         else "\n\n当前模式: CHART。输出示例: {\"type\": \"pie\", \"title\": \"\", \"labels\": [\"A\",\"B\"], \"series\": [{\"name\":\"\", \"type\":\"pie\", \"data\":[60,40]}]}"
     )
     return base + extra
+
+
+def is_voice_download_intent(text: str, mode: Literal["image", "chart"]) -> bool:
+    t = re.sub(r"\s", "", (text or "").strip().lower())
+    if not t or len(t) > 28:
+        return False
+    if mode == "image":
+        return bool(
+            re.search(r"^(下载|保存).{0,6}(图片|这张图|这幅图|相片|照片)", t)
+            or re.search(r"^(下载|保存)图", t)
+        )
+    return bool(
+        re.search(r"^(下载|保存).{0,6}(图表|这张图|这幅图)", t)
+        or re.search(r"^(下载|保存)表", t)
+    )
 
 
 async def run_llm(asr_text: str, mode: Literal["image", "chart"], prior_prompt: str | None = None):
@@ -90,7 +95,6 @@ async def run_llm(asr_text: str, mode: Literal["image", "chart"], prior_prompt: 
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     cleaned = clean_json_response(content)
-    # 兼容模型返回以 "json" 开头的前缀
     cleaned = cleaned.strip()
     if cleaned.lower().startswith("json"):
         cleaned = cleaned[4:].lstrip()
@@ -134,14 +138,14 @@ async def call_qianfan_image(prompt_en: str) -> str:
                         img_resp = await client.get(img_url)
                         img_resp.raise_for_status()
                         img_b64 = base64.b64encode(img_resp.content).decode("utf-8")
-                except Exception as exc:  # pragma: no cover - 网络异常兜底
+                except Exception as exc:
                     raise HTTPException(status_code=502, detail=f"下载图像失败: {exc}") from exc
     if not img_b64:
         raise HTTPException(status_code=502, detail=f"图像生成响应缺少图片字段: {data}")
     return img_b64
 
 
-async def _save_image_drawing(asr_text: str, prompt_en: str, prompt_cn: str | None, img_b64: str) -> None:
+async def _save_image_drawing(asr_text: str, prompt_en: str, prompt_cn: str | None, img_b64: str) -> int | None:
     try:
         payload = {
             "title": prompt_cn or "AI图片",
@@ -152,42 +156,37 @@ async def _save_image_drawing(asr_text: str, prompt_en: str, prompt_cn: str | No
         }
         from app.routers import drawings as drawings_router
 
-        await drawings_router.create_drawing_from_payload(payload)
+        return await drawings_router.create_drawing_from_payload(payload)
     except Exception:
-        pass
+        return None
 
 
-@router.post("/asr", response_model=AsrResponse)
-async def asr_only(file: UploadFile = File(...)) -> AsrResponse:
-    if file.content_type and not file.content_type.startswith("audio/"):
-        raise HTTPException(status_code=400, detail="请上传音频文件")
-    asr_text = await call_asr(file)
-    if not asr_text:
-        raise HTTPException(status_code=400, detail="未识别到语音内容")
-    return AsrResponse(asr_text=asr_text)
+async def _save_chart_drawing(asr_text: str, chart: ChartSpec) -> int | None:
+    try:
+        chart_dict = chart.model_dump()
+        payload = {
+            "title": chart.title or "图表",
+            "commands": [
+                {
+                    "action": "draw",
+                    "shape": "text",
+                    "text": "chart",
+                    "comment": json.dumps(chart_dict, ensure_ascii=False),
+                }
+            ],
+            "asr_text": asr_text,
+            "reply_text": chart.title or "",
+        }
+        from app.routers import drawings as drawings_router
 
-
-@router.post("/generate-image", response_model=DescribeResponse)
-async def generate_image(payload: GenerateImageRequest) -> DescribeResponse:
-    prompt_en = payload.prompt_en.strip()
-    img_b64 = await call_qianfan_image(prompt_en)
-    await _save_image_drawing(payload.asr_text or "", prompt_en, payload.prompt_cn, img_b64)
-    return DescribeResponse(
-        mode="image",
-        asr_text=payload.asr_text or "",
-        llm_text="",
-        prompt_en=prompt_en,
-        prompt_cn=payload.prompt_cn,
-        merged_prompt_en=prompt_en,
-        image_base64=img_b64,
-        stage="full",
-    )
+        return await drawings_router.create_drawing_from_payload(payload)
+    except Exception:
+        return None
 
 
 @router.post("/describe", response_model=DescribeResponse)
 async def describe(
     mode: Literal["image", "chart"] = Query(..., description="image | chart"),
-    stage: Literal["prompt", "full"] = Query("full", description="image 模式：prompt=仅润色，full=含生图"),
     file: UploadFile | None = File(None),
     text: str | None = Form(None),
     prior_prompt: str | None = Form(None),
@@ -204,6 +203,10 @@ async def describe(
         if not asr_text:
             raise HTTPException(status_code=400, detail="未识别到语音内容")
 
+    if is_voice_download_intent(asr_text, mode):
+        code = "VOICE_DOWNLOAD_IMAGE" if mode == "image" else "VOICE_DOWNLOAD_CHART"
+        raise HTTPException(status_code=400, detail=code)
+
     llm_text, parsed = await run_llm(asr_text, mode, prior_prompt=prior_prompt)
 
     if mode == "image":
@@ -213,19 +216,8 @@ async def describe(
         if prior_prompt:
             merged_prompt = prompt_en
 
-        if stage == "prompt":
-            return DescribeResponse(
-                mode="image",
-                asr_text=asr_text,
-                llm_text=llm_text,
-                prompt_en=prompt_en,
-                prompt_cn=prompt_cn,
-                merged_prompt_en=merged_prompt,
-                stage="prompt",
-            )
-
         img_b64 = await call_qianfan_image(prompt_en)
-        await _save_image_drawing(asr_text, prompt_en, prompt_cn, img_b64)
+        drawing_id = await _save_image_drawing(asr_text, prompt_en, prompt_cn, img_b64)
 
         return DescribeResponse(
             mode="image",
@@ -235,13 +227,15 @@ async def describe(
             prompt_cn=prompt_cn,
             merged_prompt_en=merged_prompt,
             image_base64=img_b64,
-            stage="full",
+            drawing_id=drawing_id,
         )
 
-    # chart 模式
+    chart_parsed = parsed  # type: ignore[assignment]
+    drawing_id = await _save_chart_drawing(asr_text, chart_parsed)
     return DescribeResponse(
         mode="chart",
         asr_text=asr_text,
         llm_text=llm_text,
-        chart=parsed,  # type: ignore[arg-type]
+        chart=chart_parsed,
+        drawing_id=drawing_id,
     )

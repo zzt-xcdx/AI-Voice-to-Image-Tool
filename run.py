@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "backend"))
 
 from app.config import settings  # noqa: E402
-from app.paths import BACKEND_DIR, FRONTEND_DIR  # noqa: E402
+from app.paths import BACKEND_DIR, FRONTEND_REACT_DIR  # noqa: E402
 
 if __name__ == "__main__":
     uvicorn.run(
@@ -16,5 +16,5 @@ if __name__ == "__main__":
         host=settings.app_host,
         port=settings.app_port,
         reload=True,
-        reload_dirs=[str(BACKEND_DIR), str(FRONTEND_DIR)],
+        reload_dirs=[str(BACKEND_DIR), str(FRONTEND_REACT_DIR / "dist")],
     )
