@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,15 +34,24 @@ def _ensure_db() -> Path:
             width INTEGER,
             height INTEGER,
             background_base64 TEXT,
+            exported INTEGER,
+            export_target TEXT,
+            export_time TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
-    # 兼容旧表，补充 background_base64
-    try:
-        conn.execute("ALTER TABLE drawings ADD COLUMN background_base64 TEXT")
-    except sqlite3.OperationalError:
-        pass
+    # 兼容旧表，补充字段
+    for alter in [
+        "ALTER TABLE drawings ADD COLUMN background_base64 TEXT",
+        "ALTER TABLE drawings ADD COLUMN exported INTEGER",
+        "ALTER TABLE drawings ADD COLUMN export_target TEXT",
+        "ALTER TABLE drawings ADD COLUMN export_time TEXT",
+    ]:
+        try:
+            conn.execute(alter)
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     conn.close()
     return db_path
@@ -64,6 +74,9 @@ class DrawingCreate(BaseModel):
     width: int | None = None
     height: int | None = None
     background_base64: str | None = None
+    exported: bool | None = None
+    export_target: str | None = None
+    export_time: str | None = None
 
 
 class DrawingOut(BaseModel):
@@ -76,6 +89,9 @@ class DrawingOut(BaseModel):
     height: int | None
     background_base64: str | None
     created_at: str
+    exported: bool | None = None
+    export_target: str | None = None
+    export_time: str | None = None
 
 
 class DrawingUpdate(BaseModel):
@@ -86,6 +102,9 @@ class DrawingUpdate(BaseModel):
     width: int | None = None
     height: int | None = None
     background_base64: str | None = None
+    exported: bool | None = None
+    export_target: str | None = None
+    export_time: str | None = None
 
 
 async def _insert_drawing(payload: DrawingCreate) -> int:
@@ -94,8 +113,8 @@ async def _insert_drawing(payload: DrawingCreate) -> int:
         try:
             cur = conn.execute(
                 """
-                INSERT INTO drawings (title, commands_json, asr_text, reply_text, width, height, background_base64)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO drawings (title, commands_json, asr_text, reply_text, width, height, background_base64, exported, export_target, export_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.title or "未命名",
@@ -105,6 +124,9 @@ async def _insert_drawing(payload: DrawingCreate) -> int:
                     payload.width,
                     payload.height,
                     payload.background_base64,
+                    1 if payload.exported else 0 if payload.exported is not None else None,
+                    payload.export_target,
+                    payload.export_time,
                 ),
             )
             conn.commit()
@@ -133,6 +155,9 @@ async def _fetch_one(drawing_id: int) -> DrawingOut:
                 width=row["width"],
                 height=row["height"],
                 background_base64=row["background_base64"] if "background_base64" in row.keys() else None,
+                exported=bool(row["exported"]) if "exported" in row.keys() else None,
+                export_target=row["export_target"] if "export_target" in row.keys() else None,
+                export_time=row["export_time"] if "export_time" in row.keys() else None,
                 created_at=row["created_at"],
             )
         finally:
@@ -163,6 +188,9 @@ async def _fetch_list(limit: int = 20) -> list[DrawingOut]:
                         width=row["width"],
                         height=row["height"],
                         background_base64=row["background_base64"] if "background_base64" in row.keys() else None,
+                        exported=bool(row["exported"]) if "exported" in row.keys() else None,
+                        export_target=row["export_target"] if "export_target" in row.keys() else None,
+                        export_time=row["export_time"] if "export_time" in row.keys() else None,
                         created_at=row["created_at"],
                     )
                 )
@@ -190,7 +218,7 @@ async def _update_drawing(drawing_id: int, payload: DrawingUpdate) -> DrawingOut
             conn.execute(
                 """
                 UPDATE drawings
-                SET title = ?, commands_json = ?, asr_text = ?, reply_text = ?, width = ?, height = ?, background_base64 = ?
+                SET title = ?, commands_json = ?, asr_text = ?, reply_text = ?, width = ?, height = ?, background_base64 = ?, exported = ?, export_target = ?, export_time = ?
                 WHERE id = ?
                 """,
                 (
@@ -201,6 +229,9 @@ async def _update_drawing(drawing_id: int, payload: DrawingUpdate) -> DrawingOut
                     payload.width if payload.width is not None else row["width"],
                     payload.height if payload.height is not None else row["height"],
                     bg,
+                    int(payload.exported) if payload.exported is not None else row["exported"] if "exported" in row.keys() else None,
+                    payload.export_target if payload.export_target is not None else row["export_target"] if "export_target" in row.keys() else None,
+                    payload.export_time if payload.export_time is not None else row["export_time"] if "export_time" in row.keys() else None,
                     drawing_id,
                 ),
             )
@@ -246,8 +277,8 @@ async def create_drawing_from_payload(raw: dict[str, Any]) -> int:
         try:
             cur = conn.execute(
                 """
-                INSERT INTO drawings (title, commands_json, asr_text, reply_text, width, height, background_base64)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO drawings (title, commands_json, asr_text, reply_text, width, height, background_base64, exported, export_target, export_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     raw.get("title") or "未命名",
@@ -257,6 +288,9 @@ async def create_drawing_from_payload(raw: dict[str, Any]) -> int:
                     raw.get("width"),
                     raw.get("height"),
                     raw.get("background_base64"),
+                    1 if raw.get("exported") else 0 if raw.get("exported") is not None else None,
+                    raw.get("export_target"),
+                    raw.get("export_time"),
                 ),
             )
             conn.commit()
@@ -271,6 +305,23 @@ async def create_drawing_from_payload(raw: dict[str, Any]) -> int:
 async def save_drawing(payload: DrawingCreate) -> DrawingOut:
     if not payload.commands and not payload.background_base64:
         raise HTTPException(status_code=400, detail="commands 不能为空")
+    new_id = await _insert_drawing(payload)
+    return await _fetch_one(new_id)
+
+
+@router.post("/{drawing_id}/export", response_model=DrawingOut)
+async def export_drawing(drawing_id: int, target: str = "desktop") -> DrawingOut:
+    update = DrawingUpdate(exported=True, export_target=target, export_time=datetime.utcnow().isoformat())
+    return await _update_drawing(drawing_id, update)
+
+
+@router.post("/export", response_model=DrawingOut)
+async def export_new(payload: DrawingCreate) -> DrawingOut:
+    if not payload.background_base64:
+        raise HTTPException(status_code=400, detail="缺少 background_base64")
+    payload.exported = True
+    payload.export_target = payload.export_target or "desktop"
+    payload.export_time = payload.export_time or datetime.utcnow().isoformat()
     new_id = await _insert_drawing(payload)
     return await _fetch_one(new_id)
 

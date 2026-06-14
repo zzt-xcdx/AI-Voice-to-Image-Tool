@@ -5,16 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Voice2Canvas - AI 画图</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      body, button, input, textarea {
+        font-family: "Arial", "Helvetica Neue", sans-serif;
+      }
+    </style>
   </head>
   <body class="bg-slate-50 text-slate-900">
     <div class="mx-auto max-w-5xl px-4 py-8 space-y-6">
-      <header class="flex items-center gap-3">
-        <a href="/" class="text-sm text-slate-500 hover:underline">← 返回选择</a>
-        <div>
-          <p class="text-xs uppercase text-emerald-500 font-semibold">模式：AI 画图</p>
-          <h1 class="text-2xl font-bold text-slate-900">提示词润色 + Qianfan 生图</h1>
-          <p class="text-slate-600 text-sm">语音/文字 → LLM 英文提示词 → 图片生成</p>
+      <header class="flex items-center gap-3 justify-between">
+        <div class="flex items-center gap-3">
+          <a href="/" class="text-sm text-slate-500 hover:underline">← 返回选择</a>
+          <div>
+            <p class="text-xs uppercase text-emerald-500 font-semibold">模式：AI 画图</p>
+            <h1 class="text-2xl font-bold text-slate-900">提示词润色 + Qianfan 生图</h1>
+            <p class="text-slate-600 text-sm">语音/文字 → LLM 英文提示词 → 图片生成</p>
+          </div>
         </div>
+        <button id="btn-exit" class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">退出画图</button>
       </header>
 
       <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm space-y-3">
@@ -76,6 +84,34 @@
         el.textContent = msg || "";
         el.className = "text-xs " + (tone === "error" ? "text-rose-700" : "text-amber-700");
       };
+      let exportLock = false;
+      const checkExportCommand = (text) => {
+        if (!text) return false;
+        const t = text.toLowerCase();
+        const hit = t.includes("保存到桌面") || t.includes("另存到桌面") || t.includes("保存到本地") || t.includes("导出到桌面") || t.includes("save to desktop");
+        if (hit && !exportLock) {
+          exportLock = true;
+          setStatus("检测到桌面导出指令，执行中…");
+          exportToDesktop().finally(() => {
+            setTimeout(() => (exportLock = false), 1500);
+          });
+          return true;
+        }
+        return hit;
+      };
+      const exitImage = async () => {
+        await stopListening();
+        window.location.href = "/";
+      };
+      const checkExitCommand = (text) => {
+        if (!text) return false;
+        const t = text.toLowerCase();
+        if (t.includes("退出") || t.includes("离开") || t.includes("返回") || t.includes("回首页") || t.includes("回主界面")) {
+          exitImage();
+          return true;
+        }
+        return false;
+      };
       const renderImage = (b64) => {
         const box = $("img-box");
         if (!b64) {
@@ -107,6 +143,7 @@
         $("prompt-en").textContent = data.prompt_en || "";
         renderImage(data.image_base64);
         window._lastImage = data;
+        checkExportCommand(data.asr_text || "");
         $("btn-retry").style.display = lastPayload ? "inline-flex" : "none";
       };
       // --- 语音悬浮球与自动 VAD ---
@@ -116,6 +153,7 @@
       let vadEnabled = false;
       let isSpeaking = false;
       let silenceCount = 0;
+      let speakingFrames = 0;
       let energyThreshold = 0.01; // 初始阈值，后续自适应
       let recognizer = null;
 
@@ -133,6 +171,8 @@
               text += ev.results[i][0].transcript;
             }
             $("live").textContent = text;
+            checkExitCommand(text);
+            checkExportCommand(text);
           };
           r.onerror = () => {};
           r.start();
@@ -208,38 +248,41 @@
             if (!isSpeaking && rms > energyThreshold) {
               // 进入语音段
               isSpeaking = true;
+              speakingFrames = 0;
               silenceCount = 0;
               chunks = [];
               mediaRecorder.start();
               recognizer = attachRecognizer();
               setStatus("检测到语音，录音中…");
             } else if (isSpeaking) {
+              speakingFrames++;
               if (rms > energyThreshold * 0.6) {
                 silenceCount = 0;
               } else {
                 silenceCount++;
               }
-              // 静音超过一定帧数认为结束
-            if (silenceCount > 15) {
+              // 至少说够一段时间，且静音更长才收口（~2s），避免话没说完
+              if (speakingFrames > 20 && silenceCount > 42) {
                 isSpeaking = false;
                 silenceCount = 0;
-              stopRecognizer();
-              setStatus("上传识别中…");
-              mediaRecorder.onstop = () => {
-                const blob = new Blob(chunks, { type: "audio/webm" });
-                chunks = [];
+                speakingFrames = 0;
+                stopRecognizer();
                 setStatus("上传识别中…");
-                sendDescribe({ blob })
-                  .then((data) => {
-                    setStatus("LLM 生成提示词…");
-                    handleResult(data);
-                    $("live").textContent = "";
-                    setStatus("完成");
-                  })
-                  .catch((err) => setStatus(err.message || "错误", "error"));
-              };
-              mediaRecorder.stop();
-              }
+                mediaRecorder.onstop = () => {
+                  const blob = new Blob(chunks, { type: "audio/webm" });
+                  chunks = [];
+                  setStatus("上传识别中…");
+                  sendDescribe({ blob })
+                    .then((data) => {
+                      setStatus("LLM 生成提示词…");
+                      handleResult(data);
+                      $("live").textContent = "";
+                      setStatus("完成");
+                    })
+                    .catch((err) => setStatus(err.message || "错误", "error"));
+                };
+                mediaRecorder.stop();
+                }
             }
           };
 
@@ -318,6 +361,7 @@
 
       $("btn-send-text").onclick = sendText;
       $("btn-retry").onclick = retryLast;
+      $("btn-exit").onclick = exitImage;
       renderImage("");
 
       // --- 保存/加载 ---
@@ -392,6 +436,34 @@
           setSaveStatus(err.message || "错误", "error");
         }
       };
+      const exportToDesktop = async () => {
+        const img = window._lastImage?.image_base64;
+        if (!img) {
+          setSaveStatus("暂无生成的图片可导出", "error");
+          return;
+        }
+        const a = document.createElement("a");
+        a.href = `data:image/png;base64,${img}`;
+        a.download = `${Date.now()}-image.png`;
+        a.click();
+        try {
+          const payload = {
+            title: $("title").value || "导出图片",
+            commands: [],
+            background_base64: `data:image/png;base64,${img}`,
+            exported: true,
+            export_target: "desktop",
+          };
+          await fetch(`${apiBase}/api/drawings/export`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          setSaveStatus("已导出并记录");
+        } catch (err) {
+          setSaveStatus("导出记录失败（已本地下载）", "error");
+        }
+      };
       listEl.addEventListener("click", (e) => {
         const btn = e.target;
         if (btn.classList.contains("btn-load")) {
@@ -427,6 +499,11 @@
       });
       $("btn-save").onclick = saveCurrent;
       $("btn-list").onclick = fetchList;
+      const exportBtn = document.createElement("button");
+      exportBtn.textContent = "另存到桌面";
+      exportBtn.className = "rounded-lg bg-slate-900 text-white px-3 py-2 text-sm font-semibold hover:bg-slate-800";
+      exportBtn.onclick = exportToDesktop;
+      document.querySelector("section.rounded-2xl.border.border-slate-200.bg-white.p-5.shadow-sm.space-y-3 .flex.flex-wrap").appendChild(exportBtn);
       fetchList();
     </script>
   </body>
