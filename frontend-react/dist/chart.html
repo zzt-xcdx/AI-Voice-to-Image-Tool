@@ -84,11 +84,68 @@
         el.textContent = msg || "";
         el.className = "text-xs " + (tone === "error" ? "text-rose-700" : "text-amber-700");
       };
+      const stateLabel = {
+        idle: "等待指令",
+        listening: "倾听中",
+        recording: "录音中…",
+        uploading: "上传识别中…",
+        analyzing: "LLM 处理中…",
+        generating: "生成图表…",
+        tts: "语音播报中",
+        done: "完成",
+        error: "出错",
+      };
+      let currentState = "idle";
+      const setState = (s, msg, tone = "info") => {
+        currentState = s;
+        setStatus(msg || stateLabel[s] || "", tone);
+        document.body.dataset.state = s;
+      };
+      let ttsSpeaking = false;
+      const speak = (text) =>
+        new Promise((resolve) => {
+          if (!text) return resolve();
+          const shouldResume = vadEnabled;
+          const doSpeak = () => {
+            const utter = new SpeechSynthesisUtterance(text);
+            utter.lang = "zh-CN";
+            utter.rate = 1.0;
+            utter.pitch = 1.0;
+            utter.onstart = () => {
+              ttsSpeaking = true;
+              setState("tts");
+            };
+            utter.onend = () => {
+              ttsSpeaking = false;
+              if (shouldResume) startListening();
+              resolve();
+            };
+            utter.onerror = () => {
+              ttsSpeaking = false;
+              if (shouldResume) startListening();
+              resolve();
+            };
+            window.speechSynthesis.speak(utter);
+          };
+          if (vadEnabled) {
+            stopListening().then(doSpeak);
+          } else {
+            doSpeak();
+          }
+        });
       let exportLock = false;
       const checkExportCommand = (text) => {
         if (!text) return false;
         const t = text.toLowerCase();
-        const hit = t.includes("保存到桌面") || t.includes("另存到桌面") || t.includes("保存到本地") || t.includes("导出到桌面") || t.includes("save to desktop");
+        const hit =
+          t.includes("保存到桌面") ||
+          t.includes("另存到桌面") ||
+          t.includes("保存到本地") ||
+          t.includes("导出到桌面") ||
+          t.includes("下载到桌面") ||
+          t.includes("下载") ||
+          t.includes("save to desktop") ||
+          t.includes("download");
         if (hit && !exportLock) {
           exportLock = true;
           setStatus("检测到桌面导出指令，执行中…");
@@ -119,12 +176,16 @@
       let processorNode = null;
       let vadEnabled = false;
       let isSpeaking = false;
-      let silenceCount = 0;
       let energyThreshold = 0.01;
+      let speakingStartMs = 0;
+      let lastVoiceMs = 0;
+      const minSpeechMs = 800;
+      const silenceStopMs = 2000;
       let recognizer = null;
 
       const attachRecognizer = () => {
         try {
+          if (ttsSpeaking) return null;
           const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
           if (!Recognition) return null;
           const r = new Recognition();
@@ -132,6 +193,7 @@
           r.interimResults = true;
           r.lang = "zh-CN";
           r.onresult = (ev) => {
+            if (ttsSpeaking) return;
             let text = "";
             for (let i = ev.resultIndex; i < ev.results.length; i++) {
               text += ev.results[i][0].transcript;
@@ -205,35 +267,41 @@
               frameCount++;
             }
 
+            const now = Date.now();
             if (!isSpeaking && rms > energyThreshold) {
               isSpeaking = true;
-              silenceCount = 0;
+              speakingStartMs = now;
+              lastVoiceMs = now;
               chunks = [];
               mediaRecorder.start();
               recognizer = attachRecognizer();
-              setStatus("检测到语音，录音中…");
+              setState("recording", "检测到语音，录音中…");
             } else if (isSpeaking) {
               if (rms > energyThreshold * 0.6) {
-                silenceCount = 0;
-              } else {
-                silenceCount++;
+                lastVoiceMs = now;
               }
-              if (silenceCount > 15) {
+              const spokenMs = now - speakingStartMs;
+              const silentMs = now - lastVoiceMs;
+              if (spokenMs >= minSpeechMs && silentMs > silenceStopMs) {
                 isSpeaking = false;
-                silenceCount = 0;
+                speakingStartMs = 0;
+                lastVoiceMs = 0;
                 stopRecognizer();
-                setStatus("上传识别中…");
+                setState("uploading");
                 mediaRecorder.onstop = () => {
                   const blob = new Blob(chunks, { type: "audio/webm" });
                   chunks = [];
                   sendDescribe({ blob })
                     .then((data) => {
-                      setStatus("LLM 生成图表中…");
+                      setState("analyzing", "LLM 生成图表中…");
                       handleResult(data);
                       $("live").textContent = "";
-                      setStatus("完成");
+                      setState("done");
                     })
-                    .catch((err) => setStatus(err.message || "错误", "error"));
+                    .catch((err) => {
+                      setState("error", err.message || "错误", "error");
+                      speak(err.message || "发生错误").catch(() => {});
+                    });
                 };
                 mediaRecorder.stop();
               }
@@ -241,16 +309,16 @@
           };
 
           vadEnabled = true;
-          setStatus("监听中：请开始说话");
+          setState("listening", "监听中：请开始说话");
         } catch (err) {
-          setStatus(err?.message || "麦克风开启失败", "error");
+          setState("error", err?.message || "麦克风开启失败", "error");
         }
       };
 
       const stopListening = async () => {
         vadEnabled = false;
         await teardownAudio();
-        setStatus("未开启监听");
+        setState("idle", "未开启监听");
       };
 
       const bubble = document.createElement("button");
@@ -290,7 +358,7 @@
         const palette = [
           "#2563eb", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#f97316", "#22c55e",
         ];
-        const baseGrid = { left: 50, right: 30, top: 60, bottom: 40, containLabel: true };
+        const baseGrid = { left: 50, right: 30, top: 90, bottom: 40, containLabel: true };
         const baseTooltip = {
           backgroundColor: "rgba(15,23,42,0.9)",
           borderColor: "#0f172a",
@@ -316,9 +384,9 @@
           return {
             backgroundColor: "#f8fafc",
             textStyle: { fontFamily: '"Arial","Helvetica Neue",sans-serif' },
-            title: { text: spec.title || "", left: "center", textStyle: { color: "#0f172a", fontWeight: 700 } },
+            title: { text: spec.title || "", left: "center", top: 8, textStyle: { color: "#0f172a", fontWeight: 700 } },
             tooltip: { ...baseTooltip, trigger: "item", formatter: "{b}<br/>{c}% ({d}%)" },
-            legend: { top: 18, left: "center", textStyle: { color: "#334155" } },
+            legend: { top: 46, left: "center", textStyle: { color: "#334155" } },
             series: [
               {
                 type: "pie",
@@ -373,9 +441,9 @@
         return {
           backgroundColor: "#f8fafc",
           textStyle: { fontFamily: '"Arial","Helvetica Neue",sans-serif' },
-          title: { text: spec.title || "", textStyle: { color: "#0f172a", fontWeight: 700 } },
+          title: { text: spec.title || "", top: 8, textStyle: { color: "#0f172a", fontWeight: 700 } },
           tooltip: { ...baseTooltip, trigger: "axis", axisPointer: { type: "shadow" } },
-          legend: { top: 16, textStyle: { color: "#334155" } },
+          legend: { top: 40, textStyle: { color: "#334155" } },
           grid: baseGrid,
           xAxis: {
             type: "category",
@@ -407,14 +475,26 @@
       };
       let lastPayload = null;
       const sendDescribe = async ({ blob, text }) => {
+        const shouldBlock = (txt) => {
+          if (!txt) return false;
+          const lower = txt.toLowerCase();
+          return lower.includes("返回主菜单") || lower.includes("回主菜单") || lower.includes("回首页");
+        };
         const form = new FormData();
         if (blob) {
           if (blob.size === 0) throw new Error("未录到音频");
           form.append("file", blob, "speech.webm");
         }
-        if (text) form.append("text", text);
+        if (text) {
+          if (shouldBlock(text)) {
+            setState("idle", "返回主菜单指令已忽略");
+            exitChart();
+            return Promise.reject(new Error("返回主菜单指令，已忽略上传"));
+          }
+          form.append("text", text);
+        }
         lastPayload = { blob, text };
-        setStatus(blob ? "上传音频…" : "提交文本…");
+        setState("uploading", blob ? "上传音频…" : "提交文本…");
         const res = await fetch(`${apiBase}/api/voice/describe?mode=chart`, { method: "POST", body: form });
         const t = await res.text();
         if (!t) throw new Error(res.statusText || "后端无返回");
@@ -429,6 +509,7 @@
         renderChart(data.chart);
         window._lastChart = data.chart;
         checkExportCommand(data.asr_text || "");
+        speak("图表已生成或正在完善").catch(() => {});
         $("btn-retry").style.display = lastPayload ? "inline-flex" : "none";
       };
       const sendText = async () => {
@@ -437,27 +518,29 @@
           setStatus("请输入文本", "error");
           return;
         }
-        setStatus("LLM 处理中…");
+        setState("analyzing", "LLM 处理中…");
         try {
           const data = await sendDescribe({ text });
           handleResult(data);
-          setStatus("完成");
+          setState("done");
         } catch (err) {
-          setStatus(err.message || "错误", "error");
+          setState("error", err.message || "错误", "error");
+          speak(err.message || "发生错误").catch(() => {});
         }
       };
       const retryLast = async () => {
         if (!lastPayload) {
-          setStatus("暂无可重试内容", "error");
+          setState("error", "暂无可重试内容", "error");
           return;
         }
-        setStatus("重试中…");
+        setState("analyzing", "重试中…");
         try {
           const data = await sendDescribe(lastPayload);
           handleResult(data);
-          setStatus("完成");
+          setState("done");
         } catch (err) {
-          setStatus(err.message || "错误", "error");
+          setState("error", err.message || "错误", "error");
+          speak(err.message || "发生错误").catch(() => {});
         }
       };
 
@@ -635,7 +718,7 @@
       $("btn-save").onclick = saveCurrent;
       $("btn-list").onclick = fetchList;
       const exportBtn = document.createElement("button");
-      exportBtn.textContent = "另存到桌面";
+      exportBtn.textContent = "下载到桌面";
       exportBtn.className = "rounded-lg bg-slate-900 text-white px-3 py-2 text-sm font-semibold hover:bg-slate-800";
       exportBtn.onclick = exportToDesktop;
       document.querySelector("section.rounded-2xl.border.border-slate-200.bg-white.p-5.shadow-sm.space-y-3 .flex.flex-wrap").appendChild(exportBtn);
