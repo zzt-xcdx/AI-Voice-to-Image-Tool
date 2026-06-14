@@ -41,6 +41,7 @@ class DescribeResponse(BaseModel):
     asr_text: str
     llm_text: str
     prompt_en: str | None = None
+    merged_prompt_en: str | None = None
     chart: ChartSpec | None = None
     image_base64: str | None = None
 
@@ -59,11 +60,17 @@ def load_prompt(mode: Literal["image", "chart"]) -> str:
     return base + extra
 
 
-async def run_llm(asr_text: str, mode: Literal["image", "chart"]):
+async def run_llm(asr_text: str, mode: Literal["image", "chart"], prior_prompt: str | None = None):
     prompt = load_prompt(mode)
     messages = [
         {"role": "system", "content": prompt},
-        {"role": "user", "content": json.dumps({"mode": mode, "text": asr_text}, ensure_ascii=False)},
+        {
+            "role": "user",
+            "content": json.dumps(
+                {"mode": mode, "text": asr_text, "prior_prompt": prior_prompt} if prior_prompt else {"mode": mode, "text": asr_text},
+                ensure_ascii=False,
+            ),
+        },
     ]
     try:
         content = await chat_completion(messages, temperature=0.3)
@@ -127,6 +134,7 @@ async def describe(
     mode: Literal["image", "chart"] = Query(..., description="image | chart"),
     file: UploadFile | None = File(None),
     text: str | None = Form(None),
+    prior_prompt: str | None = Form(None),
 ) -> DescribeResponse:
     if not file and not text:
         raise HTTPException(status_code=400, detail="请上传音频或提供 text")
@@ -140,10 +148,14 @@ async def describe(
         if not asr_text:
             raise HTTPException(status_code=400, detail="未识别到语音内容")
 
-    llm_text, parsed = await run_llm(asr_text, mode)
+    llm_text, parsed = await run_llm(asr_text, mode, prior_prompt=prior_prompt)
 
     if mode == "image":
         prompt_en = parsed.prompt_en  # type: ignore[attr-defined]
+        merged_prompt = prompt_en
+        if prior_prompt:
+            # 简单融合：LLM 已基于 prior_prompt 返回融合结果，这里直接沿用
+            merged_prompt = prompt_en
         img_b64 = await call_qianfan_image(prompt_en)
         # 自动保存到画板库（存为背景，命令为空）
         try:
@@ -168,6 +180,7 @@ async def describe(
             asr_text=asr_text,
             llm_text=llm_text,
             prompt_en=prompt_en,
+            merged_prompt_en=merged_prompt,
             image_base64=img_b64,
         )
 
