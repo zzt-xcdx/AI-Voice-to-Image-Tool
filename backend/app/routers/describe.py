@@ -36,14 +36,26 @@ class ChartSpec(BaseModel):
     note: str | None = None
 
 
+class AsrResponse(BaseModel):
+    asr_text: str
+
+
+class GenerateImageRequest(BaseModel):
+    prompt_en: str = Field(..., min_length=3)
+    prompt_cn: str | None = None
+    asr_text: str | None = None
+
+
 class DescribeResponse(BaseModel):
     mode: Literal["image", "chart"]
     asr_text: str
     llm_text: str
     prompt_en: str | None = None
+    prompt_cn: str | None = None
     merged_prompt_en: str | None = None
     chart: ChartSpec | None = None
     image_base64: str | None = None
+    stage: Literal["prompt", "full"] | None = None
 
 
 def load_prompt(mode: Literal["image", "chart"]) -> str:
@@ -129,9 +141,53 @@ async def call_qianfan_image(prompt_en: str) -> str:
     return img_b64
 
 
+async def _save_image_drawing(asr_text: str, prompt_en: str, prompt_cn: str | None, img_b64: str) -> None:
+    try:
+        payload = {
+            "title": prompt_cn or "AI图片",
+            "commands": [],
+            "asr_text": asr_text,
+            "reply_text": prompt_en,
+            "background_base64": f"data:image/png;base64,{img_b64}",
+        }
+        from app.routers import drawings as drawings_router
+
+        await drawings_router.create_drawing_from_payload(payload)
+    except Exception:
+        pass
+
+
+@router.post("/asr", response_model=AsrResponse)
+async def asr_only(file: UploadFile = File(...)) -> AsrResponse:
+    if file.content_type and not file.content_type.startswith("audio/"):
+        raise HTTPException(status_code=400, detail="请上传音频文件")
+    asr_text = await call_asr(file)
+    if not asr_text:
+        raise HTTPException(status_code=400, detail="未识别到语音内容")
+    return AsrResponse(asr_text=asr_text)
+
+
+@router.post("/generate-image", response_model=DescribeResponse)
+async def generate_image(payload: GenerateImageRequest) -> DescribeResponse:
+    prompt_en = payload.prompt_en.strip()
+    img_b64 = await call_qianfan_image(prompt_en)
+    await _save_image_drawing(payload.asr_text or "", prompt_en, payload.prompt_cn, img_b64)
+    return DescribeResponse(
+        mode="image",
+        asr_text=payload.asr_text or "",
+        llm_text="",
+        prompt_en=prompt_en,
+        prompt_cn=payload.prompt_cn,
+        merged_prompt_en=prompt_en,
+        image_base64=img_b64,
+        stage="full",
+    )
+
+
 @router.post("/describe", response_model=DescribeResponse)
 async def describe(
     mode: Literal["image", "chart"] = Query(..., description="image | chart"),
+    stage: Literal["prompt", "full"] = Query("full", description="image 模式：prompt=仅润色，full=含生图"),
     file: UploadFile | None = File(None),
     text: str | None = Form(None),
     prior_prompt: str | None = Form(None),
@@ -152,36 +208,34 @@ async def describe(
 
     if mode == "image":
         prompt_en = parsed.prompt_en  # type: ignore[attr-defined]
+        prompt_cn = getattr(parsed, "prompt_cn", None)
         merged_prompt = prompt_en
         if prior_prompt:
-            # 简单融合：LLM 已基于 prior_prompt 返回融合结果，这里直接沿用
             merged_prompt = prompt_en
-        img_b64 = await call_qianfan_image(prompt_en)
-        # 自动保存到画板库（存为背景，命令为空）
-        try:
-            payload = {
-                "title": parsed.prompt_cn or "AI图片",  # type: ignore[attr-defined]
-                "commands": [],
-                "asr_text": asr_text,
-                "reply_text": prompt_en,
-                "background_base64": f"data:image/png;base64,{img_b64}",
-            }
-            # 延迟导入以避免循环
-            from app.routers import drawings as drawings_router
 
-            # 同步插入数据库
-            await drawings_router.create_drawing_from_payload(payload)
-        except Exception:
-            # 自动保存失败不影响主流程
-            pass
+        if stage == "prompt":
+            return DescribeResponse(
+                mode="image",
+                asr_text=asr_text,
+                llm_text=llm_text,
+                prompt_en=prompt_en,
+                prompt_cn=prompt_cn,
+                merged_prompt_en=merged_prompt,
+                stage="prompt",
+            )
+
+        img_b64 = await call_qianfan_image(prompt_en)
+        await _save_image_drawing(asr_text, prompt_en, prompt_cn, img_b64)
 
         return DescribeResponse(
             mode="image",
             asr_text=asr_text,
             llm_text=llm_text,
             prompt_en=prompt_en,
+            prompt_cn=prompt_cn,
             merged_prompt_en=merged_prompt,
             image_base64=img_b64,
+            stage="full",
         )
 
     # chart 模式

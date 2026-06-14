@@ -1,177 +1,459 @@
 <!doctype html>
+
 <html lang="zh-CN">
+
   <head>
+
     <meta charset="UTF-8" />
+
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
 <title>AI语音画图</title>
+
     <script src="https://cdn.tailwindcss.com"></script>
+
   </head>
+
   <body class="bg-slate-50 text-slate-900">
+
     <div class="mx-auto max-w-4xl px-4 py-16 space-y-8">
+
       <header class="rounded-3xl border border-slate-200 bg-white/90 backdrop-blur p-10 shadow-lg text-center">
+
         <p class="text-xs uppercase tracking-[0.2em] text-emerald-500 font-semibold">AI Voice Canvas</p>
+
         <h1 class="mt-2 text-4xl font-extrabold text-slate-900">AI语音画图</h1>
-        <p class="mt-3 text-slate-600 text-sm">开口即用，无需点击，语音导航进入画图或图表。</p>
-        <div id="voice-status" class="mt-2 text-xs text-emerald-600">正在监听</div>
+
+        <p class="mt-3 text-slate-600 text-sm">进入页面自动监听，说「AI画图」或「图表功能」即可进入；不想说时说「关闭语音」或点右下角关麦。</p>
+
+        <div id="voice-status" class="mt-2 text-xs text-emerald-600">正在开启语音…</div>
+
         <div class="mt-6 flex flex-col items-center gap-3">
+
           <button id="btn-enter" class="rounded-full bg-slate-900 text-white px-6 py-3 text-sm font-semibold shadow-md hover:bg-slate-800 transition">展开主菜单</button>
+
           <div class="text-xs text-slate-500">示例：说 “AI画图” / “图表功能” / “画板”</div>
+
         </div>
+
       </header>
 
+
+
       <section id="menu" class="hidden space-y-4">
+
         <div class="grid gap-4 md:grid-cols-2">
+
           <a href="/image.html" class="group rounded-2xl border border-slate-200 bg-white p-5 shadow-sm hover:border-emerald-300 hover:-translate-y-0.5 hover:shadow transition">
+
             <h2 class="text-lg font-semibold text-slate-900">AI 画图</h2>
+
             <p class="mt-2 text-sm text-slate-600">提示词润色 → 生图</p>
+
             <div class="mt-2 text-xs text-slate-500">示例：宇航员猫 / 赛博城市夜景</div>
+
           </a>
+
           <a href="/chart.html" class="group rounded-2xl border border-slate-200 bg-white p-5 shadow-sm hover:border-indigo-300 hover:-translate-y-0.5 hover:shadow transition">
+
             <h2 class="text-lg font-semibold text-slate-900">图表（ECharts）</h2>
+
             <p class="mt-2 text-sm text-slate-600">语音 → JSON → 渲染</p>
-            <div class="mt-2 text-xs text-slate-500">示例：饼图配比 / 月度柱状</div>
+
+            <div class="mt-2 text-xs text-slate-500">语音示例：饼图占比 / 柱状月度 / 折线趋势 / 关闭语音</div>
+
           </a>
+
         </div>
+
         <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm flex items-center justify-between">
+
           <div>
+
             <p class="text-sm font-semibold text-slate-900">画板库</p>
+
             <p class="text-xs text-slate-500">查看历史记录</p>
+
           </div>
+
           <a href="/drawings.html" class="text-sm font-semibold text-amber-600 hover:underline">进入 →</a>
+
         </div>
+
       </section>
+
     </div>
 
+
+
     <script>
-      // 语音悬浮球：主页语音导航
+
+      // 语音悬浮球：主页语音导航（识别常开，关麦时仅响应「开启语音」）
+
       let listening = false;
+
+      let voiceManualEnabled = true;
+
       let recognition = null;
+
       const statusEl = document.getElementById("voice-status");
+
       const setStatus = (msg, tone = "info") => {
+
         statusEl.textContent = msg;
+
         statusEl.className = "mt-2 text-xs " + (tone === "error" ? "text-rose-700" : "text-amber-700");
+
       };
+
+
+
+      const matchEnableVoice = (text) => {
+
+        const t = (text || "").replace(/\s/g, "").toLowerCase();
+
+        return t.includes("开启语音") || t.includes("打开语音");
+
+      };
+
+      const matchDisableVoice = (text) => {
+
+        const t = (text || "").replace(/\s/g, "").toLowerCase();
+
+        return t.includes("关闭语音") || t.includes("关掉语音");
+
+      };
+
+
 
       const autoCorrect = (t) => {
+
         let text = (t || "").toLowerCase();
+
         const corrections = [
+
           ["图标", "图表"],
+
           ["涂表", "图表"],
+
           ["图表功能", "图表"],
+
           ["chart", "图表"],
+
           ["echart", "图表"],
+
           ["一查特", "图表"],
+
           ["易差", "图表"],
+
           ["ai画图", "ai画图"],
+
           ["爱画图", "ai画图"],
+
           ["生兔", "生图"],
+
           ["生图", "生图"],
+
           ["ai生图", "ai画图"],
+
           ["ai 生成图片", "ai画图"],
+
           ["画板功能", "画板"],
+
         ];
+
         corrections.forEach(([k, v]) => {
+
           if (text.includes(k.toLowerCase())) {
+
             text = text.replace(k.toLowerCase(), v.toLowerCase());
+
           }
+
         });
+
         return text;
+
       };
+
       const normalizeText = (t) => autoCorrect(t);
+
       const routeByText = (t) => {
+
         const text = normalizeText(t);
+
+        if (text.includes("展开") || text.includes("菜单")) {
+
+          document.getElementById("menu").classList.remove("hidden");
+
+          setStatus("已展开菜单");
+
+          return true;
+
+        }
+
         if (text.includes("画板")) {
+
           setStatus("进入画板库…");
+
           window.location.href = "/drawings.html";
+
           return true;
+
         }
+
         if (text.includes("图表") || text.includes("chart") || text.includes("echarts")) {
+
           setStatus("进入图表功能…");
+
           window.location.href = "/chart.html";
+
           return true;
+
         }
+
         if (text.includes("画图") || text.includes("ai") || text.includes("生图")) {
+
           setStatus("进入 AI 画图…");
+
           window.location.href = "/image.html";
+
           return true;
+
         }
+
         return false;
+
       };
+
+
+
+      const setVoiceOff = () => {
+
+        voiceManualEnabled = false;
+
+        updateBubbleUI();
+
+        setStatus("语音已关闭，可说「开启语音」恢复");
+
+      };
+
+      const setVoiceOn = () => {
+
+        voiceManualEnabled = true;
+
+        updateBubbleUI();
+
+        setStatus("监听中：说“AI画图”或“图表功能”进入");
+
+      };
+
+
 
       const startVoiceNav = () => {
+
         try {
+
           const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
           if (!Recognition) {
+
+            voiceManualEnabled = false;
+
             setStatus("浏览器不支持语音识别", "error");
+
             return;
+
           }
+
+          if (recognition) {
+
+            try {
+
+              recognition.stop();
+
+            } catch (e) {}
+
+          }
+
           recognition = new Recognition();
+
           recognition.continuous = true;
+
           recognition.interimResults = true;
+
           recognition.lang = "zh-CN";
 
-          recognition.onstart = () => setStatus("监听中：说“AI画图”或“图表功能”进入");
+
+
+          recognition.onstart = () => {
+
+            if (voiceManualEnabled) setStatus("监听中：说“AI画图”或“图表功能”进入");
+
+            else setStatus("语音已关闭，可说「开启语音」恢复");
+
+          };
+
           recognition.onerror = (e) => setStatus(`语音错误：${e.error || "unknown"}`, "error");
+
           recognition.onend = () => {
-            if (listening) recognition.start(); // 自动重启
+
+            if (listening) {
+
+              try {
+
+                recognition.start();
+
+              } catch (e) {}
+
+            }
+
           };
+
           recognition.onresult = (ev) => {
+
+            let heard = "";
+
             let finalText = "";
+
             for (let i = ev.resultIndex; i < ev.results.length; i++) {
+
               const res = ev.results[i];
+
               const txt = res[0].transcript.trim();
-              if (res.isFinal) {
-                finalText += txt;
-              }
+
+              heard += txt;
+
+              if (res.isFinal) finalText += txt;
+
             }
+
+            if (matchDisableVoice(heard)) {
+
+              setVoiceOff();
+
+              return;
+
+            }
+
+            if (!voiceManualEnabled) {
+
+              if (matchEnableVoice(heard)) setVoiceOn();
+
+              return;
+
+            }
+
             if (finalText) {
+
               const corrected = normalizeText(finalText);
+
               const routed = routeByText(corrected);
+
               if (!routed) setStatus(`未识别入口：${corrected}（原始：${finalText}）`);
+
             }
+
           };
+
           recognition.start();
+
           listening = true;
-          setStatus("正在监听");
+
+          setStatus(voiceManualEnabled ? "正在监听" : "语音已关闭，可说「开启语音」恢复");
+
         } catch (e) {
+
+          voiceManualEnabled = false;
+
           setStatus(e?.message || "语音启动失败", "error");
+
         }
+
       };
 
-      // 悬浮球
-      const bubble = document.createElement("button");
-      bubble.id = "voice-bubble";
-      bubble.style.position = "fixed";
-      bubble.style.bottom = "18px";
-      bubble.style.right = "18px";
-      bubble.style.width = "64px";
-      bubble.style.height = "64px";
-      bubble.style.borderRadius = "50%";
-      bubble.style.background = "#0f172a";
-      bubble.style.color = "#fff";
-      bubble.style.boxShadow = "0 12px 24px rgba(15,23,42,0.25)";
-      bubble.style.border = "none";
-      bubble.style.cursor = "pointer";
-      bubble.style.fontWeight = "700";
-      bubble.style.fontSize = "12px";
-      bubble.textContent = "语音 On";
-      bubble.style.background = "#059669";
-      bubble.onclick = () => {
-        // 固定开启，点击仅用于重启
-        if (!listening) {
-          startVoiceNav();
+
+
+      const updateBubbleUI = () => {
+
+        if (voiceManualEnabled) {
+
+          bubble.textContent = "语音 On";
+
+          bubble.style.background = "#059669";
+
         } else {
-          setStatus("正在监听");
+
+          bubble.textContent = "语音 Off";
+
+          bubble.style.background = "#0f172a";
+
         }
+
       };
+
+
+
+      const bubble = document.createElement("button");
+
+      bubble.id = "voice-bubble";
+
+      bubble.style.position = "fixed";
+
+      bubble.style.bottom = "18px";
+
+      bubble.style.right = "18px";
+
+      bubble.style.width = "64px";
+
+      bubble.style.height = "64px";
+
+      bubble.style.borderRadius = "50%";
+
+      bubble.style.background = "#0f172a";
+
+      bubble.style.color = "#fff";
+
+      bubble.style.boxShadow = "0 12px 24px rgba(15,23,42,0.25)";
+
+      bubble.style.border = "none";
+
+      bubble.style.cursor = "pointer";
+
+      bubble.style.fontWeight = "700";
+
+      bubble.style.fontSize = "12px";
+
+      bubble.textContent = "语音 Off";
+
+      bubble.onclick = () => {
+
+        if (voiceManualEnabled) setVoiceOff();
+
+        else setVoiceOn();
+
+      };
+
       document.body.appendChild(bubble);
-      // 默认自动开启
+
+      updateBubbleUI();
+
       startVoiceNav();
 
+
+
       document.getElementById("btn-enter").onclick = () => {
+
         document.getElementById("menu").classList.remove("hidden");
+
         window.scrollTo({ top: document.getElementById("menu").offsetTop, behavior: "smooth" });
+
       };
+
     </script>
+
   </body>
+
 </html>
+
+
