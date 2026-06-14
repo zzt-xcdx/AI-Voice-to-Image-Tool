@@ -6,16 +6,24 @@
     <title>Voice2Canvas - 图表</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <style>
+      body, button, input, textarea {
+        font-family: "Arial", "Helvetica Neue", sans-serif;
+      }
+    </style>
   </head>
   <body class="bg-slate-50 text-slate-900">
     <div class="mx-auto max-w-5xl px-4 py-8 space-y-6">
-      <header class="flex items-center gap-3">
-        <a href="/" class="text-sm text-slate-500 hover:underline">← 返回选择</a>
-        <div>
-          <p class="text-xs uppercase text-indigo-500 font-semibold">模式：图表</p>
-          <h1 class="text-2xl font-bold text-slate-900">语音 → 图表 JSON → ECharts</h1>
-          <p class="text-slate-600 text-sm">支持饼图/柱状/折线，LLM 输出结构化 JSON</p>
+      <header class="flex items-center gap-3 justify-between">
+        <div class="flex items-center gap-3">
+          <a href="/" class="text-sm text-slate-500 hover:underline">← 返回选择</a>
+          <div>
+            <p class="text-xs uppercase text-indigo-500 font-semibold">模式：图表</p>
+            <h1 class="text-2xl font-bold text-slate-900">语音 → 图表 JSON → ECharts</h1>
+            <p class="text-slate-600 text-sm">支持饼图/柱状/折线，LLM 输出结构化 JSON</p>
+          </div>
         </div>
+        <button id="btn-exit" class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">退出图表</button>
       </header>
 
       <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm space-y-3">
@@ -76,6 +84,34 @@
         el.textContent = msg || "";
         el.className = "text-xs " + (tone === "error" ? "text-rose-700" : "text-amber-700");
       };
+      let exportLock = false;
+      const checkExportCommand = (text) => {
+        if (!text) return false;
+        const t = text.toLowerCase();
+        const hit = t.includes("保存到桌面") || t.includes("另存到桌面") || t.includes("保存到本地") || t.includes("导出到桌面") || t.includes("save to desktop");
+        if (hit && !exportLock) {
+          exportLock = true;
+          setStatus("检测到桌面导出指令，执行中…");
+          exportToDesktop().finally(() => {
+            setTimeout(() => (exportLock = false), 1500);
+          });
+          return true;
+        }
+        return hit;
+      };
+      const exitChart = async () => {
+        await stopListening();
+        window.location.href = "/";
+      };
+      const checkExitCommand = (text) => {
+        if (!text) return false;
+        const t = text.toLowerCase();
+        if (t.includes("退出") || t.includes("离开") || t.includes("返回") || t.includes("回首页") || t.includes("回主界面")) {
+          exitChart();
+          return true;
+        }
+        return false;
+      };
 
       // --- 语音悬浮球 + 轻量 VAD 自动录音 ---
       let audioCtx = null;
@@ -101,6 +137,8 @@
               text += ev.results[i][0].transcript;
             }
             $("live").textContent = text;
+            checkExitCommand(text);
+            checkExportCommand(text);
           };
           r.onerror = () => {};
           r.start();
@@ -230,7 +268,7 @@
       bubble.style.cursor = "pointer";
       bubble.style.fontWeight = "700";
       bubble.style.fontSize = "12px";
-      bubble.textContent = "语音 Off";
+      bubble.textContent = "语音 On";
       bubble.onclick = async () => {
         if (vadEnabled) {
           bubble.textContent = "语音 Off";
@@ -244,8 +282,22 @@
         }
       };
       document.body.appendChild(bubble);
+      // 默认进入页面就开启监听
+      bubble.style.background = "#059669";
+      startListening();
       const buildOption = (spec) => {
         if (!spec) return null;
+        const palette = [
+          "#2563eb", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#f97316", "#22c55e",
+        ];
+        const baseGrid = { left: 50, right: 30, top: 60, bottom: 40, containLabel: true };
+        const baseTooltip = {
+          backgroundColor: "rgba(15,23,42,0.9)",
+          borderColor: "#0f172a",
+          textStyle: { color: "#e2e8f0" },
+          padding: 10,
+          extraCssText: "box-shadow:0 10px 30px rgba(15,23,42,0.35); border-radius:10px;",
+        };
         const type = spec.type || "pie";
         if (type === "pie") {
           let labels = spec.labels || [];
@@ -262,38 +314,82 @@
           }
           const data = dataArr.map((v, i) => ({ value: Number(v.toFixed(2)), name: labels[i] }));
           return {
-            title: { text: spec.title || "", left: "center" },
-            tooltip: { trigger: "item", formatter: "{b}: {c}% ({d}%)" },
-            legend: { top: "5%", left: "center" },
-            series: [{ type: "pie", radius: "60%", data, label: { formatter: "{b} {d}%" } }],
+            backgroundColor: "#f8fafc",
+            textStyle: { fontFamily: '"Arial","Helvetica Neue",sans-serif' },
+            title: { text: spec.title || "", left: "center", textStyle: { color: "#0f172a", fontWeight: 700 } },
+            tooltip: { ...baseTooltip, trigger: "item", formatter: "{b}<br/>{c}% ({d}%)" },
+            legend: { top: 18, left: "center", textStyle: { color: "#334155" } },
+            series: [
+              {
+                type: "pie",
+                radius: ["45%", "70%"],
+                roseType: "radius",
+                data,
+                itemStyle: {
+                  borderColor: "#fff",
+                  borderWidth: 2,
+                  shadowBlur: 12,
+                  shadowColor: "rgba(15,23,42,0.15)",
+                },
+                label: { formatter: "{b}\n{d}%", color: "#0f172a", fontWeight: 600, fontFamily: '"Arial","Helvetica Neue",sans-serif' },
+                labelLine: { length: 18, length2: 12, smooth: true },
+                emphasis: { scale: true, scaleSize: 8, itemStyle: { shadowBlur: 18, shadowColor: "rgba(37,99,235,0.28)" } },
+              },
+            ],
           };
         }
         const labels = spec.labels || [];
-        const gradient = {
-          type: "linear",
-          x: 0, y: 0, x2: 0, y2: 1,
-          colorStops: [
-            { offset: 0, color: "#60a5fa" },
-            { offset: 1, color: "#2563eb" },
-          ],
-        };
-        const series = (spec.series || []).map((s) => {
+        const series = (spec.series || []).map((s, idx) => {
           const data = (s.data || []).map((v) => Number(v || 0));
+          const colorA = palette[idx % palette.length];
+          const colorB = palette[(idx + 1) % palette.length];
+          const gradient = {
+            type: "linear",
+            x: 0, y: 0, x2: 0, y2: 1,
+            colorStops: [
+              { offset: 0, color: colorA },
+              { offset: 1, color: colorB },
+            ],
+          };
           return {
             type: s.type || type,
             name: s.name || "数据",
             data,
-            itemStyle: { color: gradient },
-            lineStyle: { color: "#2563eb" },
-            areaStyle: s.type === "line" ? { color: "rgba(37,99,235,0.15)" } : undefined,
+            barMaxWidth: 48,
+            itemStyle: {
+              color: gradient,
+              borderRadius: s.type === "bar" ? [8, 8, 4, 4] : 0,
+              shadowBlur: 8,
+              shadowColor: "rgba(15,23,42,0.18)",
+            },
+            lineStyle: { color: colorA, width: 3 },
+            areaStyle: s.type === "line" ? { color: `${colorA}33` } : undefined,
+            smooth: s.type === "line",
+            symbol: "circle",
+            symbolSize: 8,
+            markLine: s.type === "line" ? { data: [{ type: "average", name: "均值" }] } : undefined,
           };
         });
         return {
-          title: { text: spec.title || "" },
-          tooltip: { trigger: "axis" },
-          xAxis: { type: "category", data: labels },
-          yAxis: { type: "value" },
-          legend: {},
+          backgroundColor: "#f8fafc",
+          textStyle: { fontFamily: '"Arial","Helvetica Neue",sans-serif' },
+          title: { text: spec.title || "", textStyle: { color: "#0f172a", fontWeight: 700 } },
+          tooltip: { ...baseTooltip, trigger: "axis", axisPointer: { type: "shadow" } },
+          legend: { top: 16, textStyle: { color: "#334155" } },
+          grid: baseGrid,
+          xAxis: {
+            type: "category",
+            data: labels,
+            axisLine: { lineStyle: { color: "#94a3b8" } },
+            axisLabel: { color: "#334155" },
+            axisTick: { show: false },
+          },
+          yAxis: {
+            type: "value",
+            axisLine: { show: false },
+            axisLabel: { color: "#334155" },
+            splitLine: { lineStyle: { color: "rgba(148,163,184,0.35)" } },
+          },
           series,
         };
       };
@@ -332,6 +428,7 @@
         $("chart-json").textContent = JSON.stringify(data.chart || {}, null, 2);
         renderChart(data.chart);
         window._lastChart = data.chart;
+        checkExportCommand(data.asr_text || "");
         $("btn-retry").style.display = lastPayload ? "inline-flex" : "none";
       };
       const sendText = async () => {
@@ -366,6 +463,7 @@
 
       $("btn-send-text").onclick = sendText;
       $("btn-retry").onclick = retryLast;
+      $("btn-exit").onclick = exitChart;
       renderChart(null);
 
       // --- 保存/加载 ---
@@ -459,6 +557,41 @@
           setSaveStatus(err.message || "错误", "error");
         }
       };
+
+      const exportToDesktop = async () => {
+        if (!window._lastChart) {
+          setSaveStatus("暂无生成的图表可导出", "error");
+          return;
+        }
+        const snap = captureChartDataUrl();
+        if (!snap) {
+          setSaveStatus("未获取到图表快照", "error");
+          return;
+        }
+        const a = document.createElement("a");
+        a.href = snap;
+        a.download = `${Date.now()}-chart.png`;
+        a.click();
+        try {
+          const payload = {
+            title: $("title").value || "导出图表",
+            commands: [{ action: "draw", shape: "text", text: "chart", comment: JSON.stringify(window._lastChart) }],
+            asr_text: $("asr").textContent || "",
+            reply_text: "",
+            background_base64: snap,
+            exported: true,
+            export_target: "desktop",
+          };
+          await fetch(`${apiBase}/api/drawings/export`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          setSaveStatus("已导出并记录");
+        } catch (err) {
+          setSaveStatus("导出记录失败（已本地下载）", "error");
+        }
+      };
       listEl.addEventListener("click", (e) => {
         const btn = e.target;
         if (btn.classList.contains("btn-load")) {
@@ -501,6 +634,11 @@
       });
       $("btn-save").onclick = saveCurrent;
       $("btn-list").onclick = fetchList;
+      const exportBtn = document.createElement("button");
+      exportBtn.textContent = "另存到桌面";
+      exportBtn.className = "rounded-lg bg-slate-900 text-white px-3 py-2 text-sm font-semibold hover:bg-slate-800";
+      exportBtn.onclick = exportToDesktop;
+      document.querySelector("section.rounded-2xl.border.border-slate-200.bg-white.p-5.shadow-sm.space-y-3 .flex.flex-wrap").appendChild(exportBtn);
       fetchList();
     </script>
   </body>
