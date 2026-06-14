@@ -93,6 +93,8 @@
       let listening = false;
 
       let voiceManualEnabled = true;
+      const VOICE_CMD_WINDOW = 96;
+      let voiceCmdLockUntil = 0;
 
       let recognition = null;
 
@@ -106,21 +108,48 @@
 
       };
 
+      const normalizeVoiceCmd = (text) =>
+        (text || "")
+          .replace(/\s/g, "")
+          .toLowerCase()
+          .replace(/开启语言/g, "开启语音")
+          .replace(/打开语言/g, "打开语音")
+          .replace(/关闭语言/g, "关闭语音")
+          .replace(/关掉语言/g, "关掉语音")
+          .replace(/开起语音/g, "开启语音")
+          .replace(/观闭语音/g, "关闭语音")
+          .replace(/关毕语音/g, "关闭语音");
 
+      const voiceCmdWindow = (text) => {
+        const t = normalizeVoiceCmd(text);
+        return t.length <= VOICE_CMD_WINDOW ? t : t.slice(-VOICE_CMD_WINDOW);
+      };
 
       const matchEnableVoice = (text) => {
 
-        const t = (text || "").replace(/\s/g, "").toLowerCase();
+        const t = voiceCmdWindow(text);
 
-        return t.includes("开启语音") || t.includes("打开语音");
+        return /(开启语音|打开语音|开语音|语音开启|开始语音|开麦)/.test(t);
 
       };
 
       const matchDisableVoice = (text) => {
 
-        const t = (text || "").replace(/\s/g, "").toLowerCase();
+        const t = voiceCmdWindow(text);
 
-        return t.includes("关闭语音") || t.includes("关掉语音");
+        return /(关闭语音|关掉语音|关语音|语音关闭|停止语音|关麦)/.test(t);
+
+      };
+
+      const runVoiceCmd = (fn) => {
+
+        if (Date.now() < voiceCmdLockUntil) return false;
+
+        fn();
+
+        voiceCmdLockUntil = Date.now() + 800;
+
+        return true;
 
       };
 
@@ -330,7 +359,7 @@
 
             if (matchDisableVoice(heard)) {
 
-              setVoiceOff();
+              runVoiceCmd(setVoiceOff);
 
               return;
 
@@ -338,7 +367,7 @@
 
             if (!voiceManualEnabled) {
 
-              if (matchEnableVoice(heard)) setVoiceOn();
+              if (matchEnableVoice(heard)) runVoiceCmd(setVoiceOn);
 
               return;
 

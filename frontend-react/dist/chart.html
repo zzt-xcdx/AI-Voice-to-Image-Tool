@@ -129,16 +129,72 @@
       };
       let ttsSpeaking = false;
       let voiceManualEnabled = true;
+      let voiceAutoPaused = false;
+      const VOICE_CMD_WINDOW = 96;
+      let voiceCmdLockUntil = 0;
+
+      const normalizeVoiceCmd = (text) =>
+        (text || "")
+          .replace(/\s/g, "")
+          .toLowerCase()
+          .replace(/开启语言/g, "开启语音")
+          .replace(/打开语言/g, "打开语音")
+          .replace(/关闭语言/g, "关闭语音")
+          .replace(/关掉语言/g, "关掉语音")
+          .replace(/开起语音/g, "开启语音")
+          .replace(/观闭语音/g, "关闭语音")
+          .replace(/关毕语音/g, "关闭语音")
+          .replace(/下载途片/g, "下载图片")
+          .replace(/下載图片/g, "下载图片");
+
+      const voiceCmdWindow = (text) => {
+        const t = normalizeVoiceCmd(text);
+        return t.length <= VOICE_CMD_WINDOW ? t : t.slice(-VOICE_CMD_WINDOW);
+      };
+
+      const clearHeardBuffer = () => {
+        segmentFinalText = "";
+        $("live").textContent = "";
+      };
 
       const matchEnableVoice = (text) => {
-        const t = (text || "").replace(/\s/g, "").toLowerCase();
-        return t.includes("开启语音") || t.includes("打开语音");
+        const t = voiceCmdWindow(text);
+        return /(开启语音|打开语音|开语音|语音开启|开始语音|开麦)/.test(t);
       };
       const matchDisableVoice = (text) => {
-        const t = (text || "").replace(/\s/g, "").toLowerCase();
-        return t.includes("关闭语音") || t.includes("关掉语音");
+        const t = voiceCmdWindow(text);
+        return /(关闭语音|关掉语音|关语音|语音关闭|停止语音|关麦)/.test(t);
       };
-      const setVoiceOff = () => {
+
+      const runVoiceCmd = (fn) => {
+        if (Date.now() < voiceCmdLockUntil) return false;
+        fn();
+        voiceCmdLockUntil = Date.now() + 800;
+        clearHeardBuffer();
+        return true;
+      };
+
+      const setVoiceOff = (manual = true) => {
+        voiceManualEnabled = false;
+        if (manual) voiceAutoPaused = false;
+        if (isSpeaking) {
+          isSpeaking = false;
+          speakingStartMs = 0;
+          lastVoiceMs = 0;
+          discardRecording();
+        }
+        clearHeardBuffer();
+        updateBubbleUI();
+        setState("idle", manual ? "语音已关闭，可说「开启语音」恢复" : "语音已暂停");
+      };
+      const setVoiceOn = () => {
+        voiceManualEnabled = true;
+        voiceAutoPaused = false;
+        updateBubbleUI();
+        setState("listening", "监听中：请开始说话");
+      };
+      const pauseVoiceForTask = (msg) => {
+        voiceAutoPaused = true;
         voiceManualEnabled = false;
         if (isSpeaking) {
           isSpeaking = false;
@@ -146,35 +202,53 @@
           lastVoiceMs = 0;
           discardRecording();
         }
-        segmentFinalText = "";
-        $("live").textContent = "";
+        clearHeardBuffer();
         updateBubbleUI();
-        setState("idle", "语音已关闭，可说「开启语音」恢复");
+        setState("uploading", msg || "正在生成，语音已暂停…");
       };
-      const setVoiceOn = () => {
+      const resumeVoiceAfterTask = (msg) => {
+        if (!voiceAutoPaused) return;
+        voiceAutoPaused = false;
         voiceManualEnabled = true;
         updateBubbleUI();
-        setState("listening", "监听中：请开始说话");
+        setState("listening", msg || "可以继续说话了，请描述下一个图表");
+      };
+      const isDownloadIntentError = (err) => {
+        const msg = String(err?.message || err || "");
+        return msg.includes("VOICE_DOWNLOAD_CHART");
+      };
+      const handleDescribeError = (err) => {
+        if (isDownloadIntentError(err)) {
+          releaseGeneratingLock();
+          downloadChart();
+          resumeVoiceAfterTask("已下载图表，可继续说下一个描述");
+          setState("done");
+          return true;
+        }
+        releaseGeneratingLock();
+        resumeVoiceAfterTask("出错了，可以重新说");
+        setState("error", err.message || "错误", "error");
+        speak(err.message || "发生错误").catch(() => {});
+        return false;
       };
       const processRecognizerText = (text) => {
         if (!text || ttsSpeaking) return;
-        if (matchDisableVoice(text)) {
-          setVoiceOff();
-          segmentFinalText = "";
-          $("live").textContent = "";
+        const windowText = voiceCmdWindow(text);
+        if (matchDisableVoice(windowText)) {
+          runVoiceCmd(() => setVoiceOff(true));
+          return;
+        }
+        if (matchDownloadChart(windowText)) {
+          checkDownloadCommand(text);
           return;
         }
         if (!voiceManualEnabled) {
-          if (matchEnableVoice(text)) {
-            setVoiceOn();
-            segmentFinalText = "";
-            $("live").textContent = "";
-          }
+          if (matchEnableVoice(windowText)) runVoiceCmd(setVoiceOn);
           return;
         }
         $("live").textContent = text;
+        if (checkDownloadCommand(text)) return;
         checkExitCommand(text);
-        checkExportCommand(text);
         handleVoiceCommand(text);
       };
 
@@ -199,28 +273,24 @@
           };
           window.speechSynthesis.speak(utter);
         });
-      let exportLock = false;
-      const checkExportCommand = (text) => {
+      let downloadLock = false;
+      const matchDownloadChart = (text) => {
+        const t = voiceCmdWindow(text);
+        if (/(下载图表|保存图表|下载这张图|把图表下载|下载这幅图)/.test(t)) return true;
+        if (t.length <= 18 && /下载/.test(t) && /图|表/.test(t)) return true;
+        if (t.length <= 14 && /保存/.test(t) && /图|表/.test(t)) return true;
+        return false;
+      };
+      const checkDownloadCommand = (text) => {
         if (!text) return false;
-        const t = text.toLowerCase();
-        const hit =
-          t.includes("保存到桌面") ||
-          t.includes("另存到桌面") ||
-          t.includes("保存到本地") ||
-          t.includes("导出到桌面") ||
-          t.includes("下载到桌面") ||
-          t.includes("下载") ||
-          t.includes("save to desktop") ||
-          t.includes("download");
-        if (hit && !exportLock) {
-          exportLock = true;
-          setStatus("检测到桌面导出指令，执行中…");
-          exportToDesktop().finally(() => {
-            setTimeout(() => (exportLock = false), 1500);
-          });
-          return true;
-        }
-        return hit;
+        if (!matchDownloadChart(text)) return false;
+        if (downloadLock) return true;
+        downloadLock = true;
+        setStatus("正在下载图表…");
+        downloadChart().finally(() => {
+          setTimeout(() => (downloadLock = false), 2000);
+        });
+        return true;
       };
       const parseIndex = (text) => {
         const m = text.match(/第(\d+)|(\d+)[条个号]?/);
@@ -230,11 +300,11 @@
       const handleVoiceCommand = (text) => {
         if (!text || commandLock) return false;
         if (matchDisableVoice(text)) {
-          setVoiceOff();
+          setVoiceOff(true);
           return true;
         }
         const t = text.toLowerCase();
-        if (checkExitCommand(t) || checkExportCommand(t)) return true;
+        if (checkExitCommand(t) || checkDownloadCommand(t)) return true;
         const idx = parseIndex(t);
         if (t.includes("刷新")) {
           commandLock = true;
@@ -311,6 +381,9 @@
         if (voiceManualEnabled) {
           bubble.textContent = "语音 On";
           bubble.style.background = "#059669";
+        } else if (voiceAutoPaused || generatingLock) {
+          bubble.textContent = "生成中";
+          bubble.style.background = "#d97706";
         } else {
           bubble.textContent = "语音 Off";
           bubble.style.background = "#0f172a";
@@ -331,7 +404,10 @@
             let interim = "";
             for (let i = ev.resultIndex; i < ev.results.length; i++) {
               const res = ev.results[i];
-              if (res.isFinal) segmentFinalText += res[0].transcript;
+              if (res.isFinal) {
+                segmentFinalText += res[0].transcript;
+                if (segmentFinalText.length > 300) segmentFinalText = segmentFinalText.slice(-150);
+              }
               else interim += res[0].transcript;
             }
             processRecognizerText(segmentFinalText + interim);
@@ -476,7 +552,11 @@
       bubble.style.fontSize = "12px";
       bubble.textContent = "语音 Off";
       bubble.onclick = () => {
-        if (voiceManualEnabled) setVoiceOff();
+        if (generatingLock || voiceAutoPaused) {
+          setStatus("正在生成中，请稍候完成后再操作语音");
+          return;
+        }
+        if (voiceManualEnabled) setVoiceOff(true);
         else setVoiceOn();
       };
       document.body.appendChild(bubble);
@@ -603,21 +683,77 @@
         window.addEventListener("resize", () => chartInstance && chartInstance.resize());
       };
       let lastPayload = null;
+      const blobToWav16k = async (blob) => {
+        const ctx = new AudioContext({ sampleRate: 16000 });
+        try {
+          const decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
+          const len = decoded.length;
+          const channels = decoded.numberOfChannels;
+          const mono = new Float32Array(len);
+          for (let c = 0; c < channels; c++) {
+            const ch = decoded.getChannelData(c);
+            for (let i = 0; i < len; i++) mono[i] += ch[i] / channels;
+          }
+          let samples = mono;
+          if (decoded.sampleRate !== 16000) {
+            const ratio = decoded.sampleRate / 16000;
+            const newLen = Math.floor(len / ratio);
+            const resampled = new Float32Array(newLen);
+            for (let i = 0; i < newLen; i++) resampled[i] = mono[Math.floor(i * ratio)];
+            samples = resampled;
+          }
+          const dataLen = samples.length * 2;
+          const wavBuf = new ArrayBuffer(44 + dataLen);
+          const view = new DataView(wavBuf);
+          const writeStr = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+          writeStr(0, "RIFF");
+          view.setUint32(4, 36 + dataLen, true);
+          writeStr(8, "WAVE");
+          writeStr(12, "fmt ");
+          view.setUint32(16, 16, true);
+          view.setUint16(20, 1, true);
+          view.setUint16(22, 1, true);
+          view.setUint32(24, 16000, true);
+          view.setUint32(28, 16000 * 2, true);
+          view.setUint16(32, 2, true);
+          view.setUint16(34, 16, true);
+          writeStr(36, "data");
+          view.setUint32(40, dataLen, true);
+          let off = 44;
+          for (let i = 0; i < samples.length; i++) {
+            const s = Math.max(-1, Math.min(1, samples[i]));
+            view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+            off += 2;
+          }
+          return new Blob([wavBuf], { type: "audio/wav" });
+        } finally {
+          await ctx.close();
+        }
+      };
       const sendDescribe = async ({ blob, text }) => {
         if (generatingLock) throw new Error("上一个图表还在生成中，请稍候");
         generatingLock = true;
+        pauseVoiceForTask(blob ? "上传音频中，语音已暂停…" : "正在生成，语音已暂停…");
         const shouldBlock = (txt) => {
           if (!txt) return false;
           const lower = txt.toLowerCase();
           return lower.includes("返回主菜单") || lower.includes("回主菜单") || lower.includes("回首页");
         };
+        if (text && matchDownloadChart(text)) {
+          releaseGeneratingLock();
+          resumeVoiceAfterTask();
+          checkDownloadCommand(text);
+          return Promise.reject(new Error("VOICE_DOWNLOAD_CHART"));
+        }
         const form = new FormData();
         if (blob) {
           if (blob.size === 0) {
             releaseGeneratingLock();
+            resumeVoiceAfterTask();
             throw new Error("未录到音频");
           }
-          form.append("file", blob, "speech.webm");
+          const wavBlob = await blobToWav16k(blob);
+          form.append("file", wavBlob, "speech.wav");
         }
         if (text) {
           if (shouldBlock(text)) {
@@ -644,8 +780,21 @@
         renderChart(data.chart);
         releaseGeneratingLock();
         window._lastChart = data.chart;
-        checkExportCommand(data.asr_text || "");
-        speak("图表已生成或正在完善").catch(() => {});
+        const drawingId = data.drawing_id;
+        setTimeout(() => {
+          const snap = captureChartDataUrl();
+          if (drawingId && snap) {
+            fetch(`${apiBase}/api/drawings/${drawingId}`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ background_base64: snap }),
+            }).catch(() => {});
+          }
+          fetchList();
+        }, 600);
+        speak("图表已生成或正在完善")
+          .catch(() => {})
+          .finally(() => resumeVoiceAfterTask("图表已生成，请继续说下一个描述"));
         $("btn-retry").style.display = lastPayload ? "inline-flex" : "none";
       };
       const discardRecording = () => {
@@ -675,6 +824,12 @@
         }
         const text = ($("live").textContent || segmentFinalText || "").trim();
         segmentFinalText = "";
+        if (text && checkDownloadCommand(text)) {
+          $("live").textContent = "";
+          discardRecording();
+          isSpeaking = false;
+          return;
+        }
         if (text && handleVoiceCommand(text)) {
           $("live").textContent = "";
           discardRecording();
@@ -686,7 +841,7 @@
           $("live").textContent = "";
           return;
         }
-        setState("uploading");
+        pauseVoiceForTask("上传音频中，语音已暂停…");
         mediaRecorder.onstop = () => {
           const blob = new Blob(chunks, { type: "audio/webm" });
           chunks = [];
@@ -698,9 +853,7 @@
               setState("done");
             })
             .catch((err) => {
-              releaseGeneratingLock();
-              setState("error", err.message || "错误", "error");
-              speak(err.message || "发生错误").catch(() => {});
+              if (!handleDescribeError(err)) return;
             });
         };
         mediaRecorder.stop();
@@ -711,15 +864,17 @@
           setStatus("请输入文本", "error");
           return;
         }
+        if (matchDownloadChart(text)) {
+          checkDownloadCommand(text);
+          return;
+        }
         setState("analyzing", "LLM 处理中…");
         try {
           const data = await sendDescribe({ text });
           handleResult(data);
           setState("done");
         } catch (err) {
-          releaseGeneratingLock();
-          setState("error", err.message || "错误", "error");
-          speak(err.message || "发生错误").catch(() => {});
+          handleDescribeError(err);
         }
       };
       const retryLast = async () => {
@@ -733,9 +888,7 @@
           handleResult(data);
           setState("done");
         } catch (err) {
-          releaseGeneratingLock();
-          setState("error", err.message || "错误", "error");
-          speak(err.message || "发生错误").catch(() => {});
+          handleDescribeError(err);
         }
       };
 
@@ -887,38 +1040,37 @@
         }
       };
 
-      const exportToDesktop = async () => {
+      const downloadChart = async () => {
         if (!window._lastChart) {
-          setSaveStatus("暂无生成的图表可导出", "error");
+          setSaveStatus("暂无图表可下载，请先生成", "error");
           return;
         }
         const snap = captureChartDataUrl();
         if (!snap) {
-          setSaveStatus("未获取到图表快照", "error");
+          setSaveStatus("未获取到图表图片", "error");
           return;
         }
-        const a = document.createElement("a");
-        a.href = snap;
-        a.download = `${Date.now()}-chart.png`;
-        a.click();
         try {
-          const payload = {
-            title: $("title").value || "导出图表",
-            commands: [{ action: "draw", shape: "text", text: "chart", comment: JSON.stringify(window._lastChart) }],
-            asr_text: $("asr").textContent || "",
-            reply_text: "",
-            background_base64: snap,
-            exported: true,
-            export_target: "desktop",
-          };
-          await fetch(`${apiBase}/api/drawings/export`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          });
-          setSaveStatus("已导出并记录");
+          const resp = await fetch(snap);
+          const blob = await resp.blob();
+          if (!blob || blob.size < 100) {
+            setSaveStatus("图表图片无效，请重试", "error");
+            return;
+          }
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `ai-chart-${Date.now()}.png`;
+          a.style.display = "none";
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => {
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+          }, 200);
+          setSaveStatus("图表已开始下载，请在浏览器下载栏查看");
         } catch (err) {
-          setSaveStatus("导出记录失败（已本地下载）", "error");
+          setSaveStatus("下载失败，请重试", "error");
         }
       };
       listEl.addEventListener("click", (e) => {
@@ -963,11 +1115,11 @@
       });
       $("btn-save").onclick = saveCurrent;
       $("btn-list").onclick = fetchList;
-      const exportBtn = document.createElement("button");
-      exportBtn.textContent = "下载到桌面";
-      exportBtn.className = "rounded-lg bg-slate-900 text-white px-3 py-2 text-sm font-semibold hover:bg-slate-800";
-      exportBtn.onclick = exportToDesktop;
-      document.querySelector("section.rounded-2xl.border.border-slate-200.bg-white.p-5.shadow-sm.space-y-3 .flex.flex-wrap").appendChild(exportBtn);
+      const downloadBtn = document.createElement("button");
+      downloadBtn.textContent = "下载图表";
+      downloadBtn.className = "rounded-lg bg-slate-900 text-white px-3 py-2 text-sm font-semibold hover:bg-slate-800";
+      downloadBtn.onclick = downloadChart;
+      document.querySelector("section.rounded-2xl.border.border-slate-200.bg-white.p-5.shadow-sm.space-y-3 .flex.flex-wrap").appendChild(downloadBtn);
       fetchList();
     </script>
   </body>
