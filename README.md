@@ -1,4 +1,4 @@
-# AI 语音绘图工具 (Voice2Canvas)
+# AI 语音绘图工具
 
 > 纯语音驱动的 AI 生图 & 图表生成。开口即用，无需点击，支持语音导航、生成、导出与历史管理。
 
@@ -78,7 +78,7 @@ QINIU/
 │   │   └── services/llm.py      # LLM 统一调用
 │   └── requirements.txt
 ├── frontend-react/
-│   └── dist/                    # 静态前端（主页、image.html、chart.html、drawings.html）
+│   └── dist/                    # 静态前端
 ├── prompts/
 │   └── voice_drawing.md         # LLM 提示词模板（图片/图表双模式）
 ├── data/
