@@ -2,7 +2,6 @@
 
 > 纯语音驱动的 AI 生图 & 图表生成。开口即用，无需点击，支持语音导航、生成、导出与历史管理。
 
-bilibili:https://www.bilibili.com/video/BV1fqJw6WEYf/?spm_id_from=333.1387.homepage.video_card.click&vd_source=8a035e308519ac60a7a4d83c6c575bab
 
 docs/DESIGN.md 设计文档
 
